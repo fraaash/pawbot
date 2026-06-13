@@ -120,7 +120,10 @@ ${text}`
     });
 
     const order = JSON.parse(res.content[0].text.trim());
-    const today = new Date().toISOString().split('T')[0];
+    // Use Malaysia time (UTC+8)
+    const now = new Date();
+    const myTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const today = myTime.toISOString().split('T')[0];
 
     // 2. Find or create customer
     // Prepare cat names string and count
@@ -152,7 +155,7 @@ ${text}`
                             ? order.paymentMethod
                             : 'Online',
       'Channel':            'FB/Insta',
-      'Notes':              order.notes || 'Pls call customer before arriving'
+      'Notes':              order.notes || ''
     };
     // Only set Collection Date if provided — leave blank otherwise
     if (order.collectionDate) poFields['Collection Date'] = order.collectionDate;
@@ -316,7 +319,10 @@ async function generateOrderId(customerName) {
 // ── Handle question ───────────────────────────────────────────────────────────
 async function handleQuestion(question) {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    // Use Malaysia time (UTC+8)
+    const now = new Date();
+    const myTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const today = myTime.toISOString().split('T')[0];
 
     // Fetch today's orders
     const todayOrders = await base(T_ORDERS).select({
