@@ -19,6 +19,7 @@ const GROUP_CHAT_ID = process.env.TELEGRAM_GROUP_CHAT_ID;
 const T_ORDERS    = 'Purchase Orders';
 const T_CUSTOMERS = 'Customers';
 const T_LINEITEMS = 'Order Line Items';
+const T_PRODUCTS  = 'Product';
 
 // ── Set webhook on startup ────────────────────────────────────────────────────
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
@@ -90,8 +91,10 @@ Return this exact structure:
   "address": "",
   "state": "",
   "postcode": "",
-  "catName": "",
+  "catNames": [],
   "collectionMethod": "",
+  "collectionDate": "",
+  "paymentMethod": "",
   "items": [
     { "itemName": "Bawk Bawk (Chicken) - Starter Promotion", "quantity": 0, "price": 0 }
   ],
@@ -101,11 +104,14 @@ Return this exact structure:
 }
 
 Rules:
-- collectionMethod: "Courier Required", "Self Pick Up", or "Self Deliver"
-- items: one entry per product type ordered, skip if quantity is 0
-- price = unit price (number only, no RM)
+- catNames: extract ALL cat names as array, split by comma, "and", or "/". e.g. "Mochi, Ebbi, Money" → ["Mochi", "Ebbi", "Money"]
+- collectionMethod: default "Courier Required". Use "Self Pick Up" if they mention pickup/self pickup. Use "Self Deliver" if they mention Lalamove/Grab/self deliver
+- collectionDate: the expected delivery/collection date mentioned in the form. Format as YYYY-MM-DD. Leave "" if not mentioned
+- paymentMethod: default "Online". Change only if form explicitly states otherwise (e.g. cash)
+- items: one entry per product type, skip if quantity 0
+- price = unit price as number only (no RM)
 - deliveryFees and totalAmount = numbers only
-- If postcode found in address, extract it
+- Extract postcode from address if present
 - Detect state from address if not explicitly stated
 
 Order form:
@@ -117,6 +123,13 @@ ${text}`
     const today = new Date().toISOString().split('T')[0];
 
     // 2. Find or create customer
+    // Prepare cat names string and count
+    const catNamesArr = order.catNames || (order.catName ? [order.catName] : []);
+    const catNamesStr = catNamesArr.join(', ');
+    const numPets     = catNamesArr.length;
+    order.catNamesStr = catNamesStr;
+    order.numPets     = numPets;
+
     const customerRecId = await findOrCreateCustomer(order);
 
     // 3. Generate next Order ID
@@ -141,55 +154,62 @@ ${text}`
       .reduce((sum, i) => sum + (i.price * i.quantity), 0);
 
     // 5. Create Purchase Order
-    const poRecord = await base(T_ORDERS).create([{
-      fields: {
-        'Order Number':       nextOrderId,
-        'Customer':           [customerRecId],
-        'State':              order.state || '',
-        'Postcode':           order.postcode || '',
-        'Order Date':         today,
-        'Payment Date':       today,
-        'Process Status':     'Pending',
-        'Collection Method':  order.collectionMethod || 'Courier Required',
-        'Payment Method':     'Online',
-        'Chicken Quantity':   chickenQty,
-        'Salmon Quantity':    salmonQty,
-        'Chicken Sales':      chickenSales,
-        'Salmon Sales':       salmonSales,
-        'Delivery Fees':      order.deliveryFees,
-        'Total Amount':       order.totalAmount,
-        'Total Quantity':     chickenQty + salmonQty,
-        'Temperature Control': 'Frozen',
-        'Channel':            'WhatsApp',
-        'Notes':              order.notes || 'Pls call customer before arriving',
-        'Instructions':       'Pls call customer before arriving'
-      }
-    }]);
+    const poFields = {
+      'Order Number':       nextOrderId,
+      'Customer':           [customerRecId],
+      'Order Date':         today,
+      'Process Status':     'Pending',
+      'Collection Method':  order.collectionMethod || 'Courier Required',
+      'Payment Method':     order.paymentMethod || 'Online',
+      'Chicken Quantity':   chickenQty,
+      'Salmon Quantity':    salmonQty,
+      'Chicken Sales':      chickenSales,
+      'Salmon Sales':       salmonSales,
+      'Delivery Fees':      order.deliveryFees,
+      'Total Amount':       order.totalAmount,
+      'Total Quantity':     chickenQty + salmonQty,
+      'Temperature Control': 'Frozen',
+      'Channel':            'WhatsApp',
+      'Notes':              order.notes || 'Pls call customer before arriving',
+      'Instructions':       'Pls call customer before arriving'
+    };
+    // Only set Collection Date if provided — leave blank otherwise
+    if (order.collectionDate) poFields['Collection Date'] = order.collectionDate;
+
+    const poRecord = await base(T_ORDERS).create([{ fields: poFields }]);
 
     const poRecId = poRecord[0].id;
 
     // 6. Create Order Line Items
+    // 6. Look up Product record IDs and create Order Line Items
     for (const item of order.items) {
+      const productRec = await findProductByName(item.itemName);
+      if (!productRec) {
+        console.warn(`Product not found: ${item.itemName}`);
+        continue;
+      }
       await base(T_LINEITEMS).create([{
         fields: {
           'Purchase Orders': [poRecId],
-          'Item Name':       item.itemName,
-          'Price':           item.price,
+          'Item Name':       [productRec.id],
           'Quantity':        item.quantity
         }
       }]);
     }
 
-    // 7. Add delivery fee as line item if applicable
+    // 7. Add delivery fee line item only if > RM0
+    // Quantity = the RM amount (e.g. RM20 delivery = quantity 20)
     if (order.deliveryFees > 0) {
-      await base(T_LINEITEMS).create([{
-        fields: {
-          'Purchase Orders': [poRecId],
-          'Item Name':       'Delivery Fees',
-          'Price':           order.deliveryFees,
-          'Quantity':        1
-        }
-      }]);
+      const deliveryRec = await findProductByName('Delivery Fees');
+      if (deliveryRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [deliveryRec.id],
+            'Quantity':        order.deliveryFees
+          }
+        }]);
+      }
     }
 
     // 8. Notify group
@@ -203,12 +223,15 @@ ${text}`
 🆔 *Order No:* ${nextOrderId}
 👤 *Customer:* ${order.customerName}
 📞 *Contact:* ${order.contactNumber}
-🐱 *Cat:* ${order.catName}
+🐱 *Cat(s):* ${(order.catNames || []).join(', ') || '-'}
 📍 *Address:* ${order.address}
+🚚 *Collection:* ${order.collectionMethod || 'Courier Required'}
+📅 *Collection Date:* ${order.collectionDate || 'Not specified'}
+💳 *Payment:* ${order.paymentMethod || 'Online'}
 
 🛍️ *Items:*
 ${itemsList}
-📦 *Delivery:* ${order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees}
+📦 *Delivery Fee:* ${order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees}
 💰 *Total:* RM${order.totalAmount}
 
 _Saved to Airtable ✓_`;
@@ -224,40 +247,70 @@ _Saved to Airtable ✓_`;
 
 // ── Find existing customer or create new one ──────────────────────────────────
 async function findOrCreateCustomer(order) {
-  // Search by name
-  const existing = await base(T_CUSTOMERS).select({
-    filterByFormula: `{Name} = '${order.customerName.replace(/'/g, "\\'")}'`,
-    maxRecords: 1
-  }).all();
+  let existing = [];
+
+  // 1. Match by contact number first (best for returning customers)
+  if (order.contactNumber) {
+    const cleaned = order.contactNumber.replace(/[^0-9]/g, '');
+    existing = await base(T_CUSTOMERS).select({
+      filterByFormula: `FIND("${cleaned}", SUBSTITUTE({Contact Number}, "(", ""))`,
+      maxRecords: 1
+    }).all();
+  }
+
+  // 2. Fall back to name match
+  if (existing.length === 0 && order.customerName) {
+    existing = await base(T_CUSTOMERS).select({
+      filterByFormula: `{Name} = '${order.customerName.replace(/'/g, "\\'")}'`,
+      maxRecords: 1
+    }).all();
+  }
 
   if (existing.length > 0) {
-    // Update address/contact if missing
     const rec = existing[0];
     const updates = {};
     if (!rec.get('Contact Number') && order.contactNumber) updates['Contact Number'] = order.contactNumber;
     if (!rec.get('Address') && order.address)               updates['Address'] = order.address;
-    if (!rec.get('State') && order.state)                   updates['State'] = order.state;
-    if (!rec.get('Postcode') && order.postcode)             updates['Postcode'] = order.postcode;
-    if (!rec.get('Pet Name') && order.catName)              updates['Pet Name'] = order.catName;
+    if (!rec.get('Pet Name') && order.catNamesStr)          updates['Pet Name'] = order.catNamesStr;
+    if (order.numPets > 0) updates['No. of Pets'] = order.numPets;
     if (Object.keys(updates).length > 0) {
       await base(T_CUSTOMERS).update(rec.id, updates);
     }
     return rec.id;
   }
 
-  // Create new customer
-  const newCustomer = await base(T_CUSTOMERS).create([{
-    fields: {
-      'Name':           order.customerName,
-      'Contact Number': order.contactNumber || '',
-      'Address':        order.address || '',
-      'State':          order.state || '',
-      'Postcode':       order.postcode || '',
-      'Pet Name':       order.catName || '',
-      'No. of Pets':    order.catName ? 1 : 0
-    }
-  }]);
+  // New customer
+  const validStates = [
+    'Selangor', 'Kuala Lumpur', 'Johor', 'Penang', 'Perak',
+    'Sabah', 'Sarawak', 'Kedah', 'Kelantan', 'Melaka',
+    'Negeri Sembilan', 'Pahang', 'Perlis', 'Terengganu',
+    'Putrajaya', 'Labuan'
+  ];
+  const stateValue = validStates.find(
+    s => s.toLowerCase() === (order.state || '').toLowerCase()
+  ) || null;
+
+  const newFields = {
+    'Name':           order.customerName,
+    'Contact Number': order.contactNumber || '',
+    'Address':        order.address || '',
+    'Pet Name':       order.catNamesStr || '',
+    'No. of Pets':    order.numPets || 0
+  };
+  if (order.postcode) newFields['Postcode'] = order.postcode;
+  if (stateValue)     newFields['State']    = stateValue;
+
+  const newCustomer = await base(T_CUSTOMERS).create([{ fields: newFields }]);
   return newCustomer[0].id;
+}
+
+// ── Find product record by name ──────────────────────────────────────────────
+async function findProductByName(name) {
+  const results = await base(T_PRODUCTS).select({
+    filterByFormula: `{Name} = '${name.replace(/'/g, "\'")}'`,
+    maxRecords: 1
+  }).all();
+  return results.length > 0 ? results[0] : null;
 }
 
 // ── Generate next sequential Order Number ────────────────────────────────────
