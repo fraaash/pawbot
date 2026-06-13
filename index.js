@@ -143,7 +143,7 @@ ${text}`
     // 5. Create Purchase Order
     const poRecord = await base(T_ORDERS).create([{
       fields: {
-        'Order ID':           nextOrderId,
+        'Order Number':       nextOrderId,
         'Customer':           [customerRecId],
         'State':              order.state || '',
         'Postcode':           order.postcode || '',
@@ -200,7 +200,7 @@ ${text}`
     const msg =
 `✅ *Order logged!*
 
-🆔 *Order ID:* ${nextOrderId}
+🆔 *Order No:* ${nextOrderId}
 👤 *Customer:* ${order.customerName}
 📞 *Contact:* ${order.contactNumber}
 🐱 *Cat:* ${order.catName}
@@ -260,24 +260,23 @@ async function findOrCreateCustomer(order) {
   return newCustomer[0].id;
 }
 
-// ── Generate next sequential Order ID ────────────────────────────────────────
+// ── Generate next sequential Order Number ────────────────────────────────────
 async function generateOrderId(customerName) {
   const allOrders = await base(T_ORDERS).select({
-    fields: ['Order ID'],
-    sort: [{ field: 'Order ID', direction: 'desc' }],
+    fields: ['Order Number'],
+    sort: [{ field: 'Order Number', direction: 'desc' }],
     maxRecords: 1
   }).all();
 
   let nextNum = 1;
   if (allOrders.length > 0) {
-    const lastId = allOrders[0].get('Order ID') || '';
-    const match  = lastId.match(/^(\d+)/);
+    const lastNum = allOrders[0].get('Order Number') || '0';
+    const match   = String(lastNum).match(/^(\d+)/);
     if (match) nextNum = parseInt(match[1]) + 1;
   }
 
-  const paddedNum = String(nextNum).padStart(5, '0');
-  const shortName = customerName.split(' ')[0];
-  return `${paddedNum} (${shortName})`;
+  // Return just the padded number — your Airtable formula adds the customer name
+  return String(nextNum).padStart(5, '0');
 }
 
 // ── Handle question ───────────────────────────────────────────────────────────
