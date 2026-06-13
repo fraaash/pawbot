@@ -145,8 +145,12 @@ ${text}`
       'Customer':           [customerRecId],
       'Order Date':         today,
       'Process Status':     'Pending',
-      'Collection Method':  order.collectionMethod || 'Courier Required',
-      'Payment Method':     order.paymentMethod || 'Online',
+      'Collection Method':  ['Self Pick Up', 'Courier Required', 'Self Deliver'].includes(order.collectionMethod)
+                            ? order.collectionMethod
+                            : 'Courier Required',
+      'Payment Method':     ['Online', 'Cash'].includes(order.paymentMethod)
+                            ? order.paymentMethod
+                            : 'Online',
       'Channel':            'FB/Insta',
       'Notes':              order.notes || 'Pls call customer before arriving'
     };
