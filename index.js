@@ -147,8 +147,7 @@ ${text}`
       'Process Status':     'Pending',
       'Collection Method':  order.collectionMethod || 'Courier Required',
       'Payment Method':     order.paymentMethod || 'Online',
-      'Temperature Control': 'Frozen',
-      'Channel':            'WhatsApp',
+      'Channel':            'FB/Insta',
       'Notes':              order.notes || 'Pls call customer before arriving'
     };
     // Only set Collection Date if provided — leave blank otherwise
