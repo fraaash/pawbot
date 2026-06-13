@@ -135,43 +135,21 @@ ${text}`
     // 3. Generate next Order ID
     const nextOrderId = await generateOrderId(order.customerName);
 
-    // 4. Calculate quantities
-    // Bawk Bawk = Chicken, Gulu Gulu = Salmon
-    const isChicken = (name) => name.toLowerCase().includes('bawk bawk');
-    const isSalmon  = (name) => name.toLowerCase().includes('gulu gulu');
-
-    const chickenQty = order.items
-      .filter(i => isChicken(i.itemName))
-      .reduce((sum, i) => sum + i.quantity, 0);
-    const salmonQty = order.items
-      .filter(i => isSalmon(i.itemName))
-      .reduce((sum, i) => sum + i.quantity, 0);
-    const chickenSales = order.items
-      .filter(i => isChicken(i.itemName))
-      .reduce((sum, i) => sum + (i.price * i.quantity), 0);
-    const salmonSales = order.items
-      .filter(i => isSalmon(i.itemName))
-      .reduce((sum, i) => sum + (i.price * i.quantity), 0);
+    // 4. (Quantities and sales auto-calculated by Airtable formulas)
 
     // 5. Create Purchase Order
+    // Note: Order Number, Chicken/Salmon Qty, Sales, Delivery Fees,
+    // Total Amount, Total Quantity, Instructions are all auto-computed
+    // by Airtable formulas — do NOT write to them
     const poFields = {
-      'Order Number':       nextOrderId,
       'Customer':           [customerRecId],
       'Order Date':         today,
       'Process Status':     'Pending',
       'Collection Method':  order.collectionMethod || 'Courier Required',
       'Payment Method':     order.paymentMethod || 'Online',
-      'Chicken Quantity':   chickenQty,
-      'Salmon Quantity':    salmonQty,
-      'Chicken Sales':      chickenSales,
-      'Salmon Sales':       salmonSales,
-      'Delivery Fees':      order.deliveryFees,
-      'Total Amount':       order.totalAmount,
-      'Total Quantity':     chickenQty + salmonQty,
       'Temperature Control': 'Frozen',
       'Channel':            'WhatsApp',
-      'Notes':              order.notes || 'Pls call customer before arriving',
-      'Instructions':       'Pls call customer before arriving'
+      'Notes':              order.notes || 'Pls call customer before arriving'
     };
     // Only set Collection Date if provided — leave blank otherwise
     if (order.collectionDate) poFields['Collection Date'] = order.collectionDate;
