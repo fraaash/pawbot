@@ -206,25 +206,25 @@ ${text}`
       .join('\n');
 
     const msg =
-`✅ *Order logged!*
+`✅ <b>Order logged!</b>
 
-🆔 *Order No:* ${nextOrderId}
-👤 *Customer:* ${order.customerName}
-📞 *Contact:* ${order.contactNumber}
-🐱 *Cat(s):* ${(order.catNames || []).join(', ') || '-'}
-📍 *Address:* ${order.address}
-🚚 *Collection:* ${order.collectionMethod || 'Courier Required'}
-📅 *Collection Date:* ${order.collectionDate || 'Not specified'}
-💳 *Payment:* ${order.paymentMethod || 'Online'}
+🆔 <b>Order No:</b> ${nextOrderId}
+👤 <b>Customer:</b> ${order.customerName}
+📞 <b>Contact:</b> ${order.contactNumber}
+🐱 <b>Cat(s):</b> ${(order.catNames || []).join(', ') || '-'}
+📍 <b>Address:</b> ${order.address}
+🚚 <b>Collection:</b> ${order.collectionMethod || 'Courier Required'}
+📅 <b>Collection Date:</b> ${order.collectionDate || 'Not specified'}
+💳 <b>Payment:</b> ${order.paymentMethod || 'Online'}
 
-🛍️ *Items:*
+🛍️ <b>Items:</b>
 ${itemsList}
-📦 *Delivery Fee:* ${order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees}
-💰 *Total:* RM${order.totalAmount}
+📦 <b>Delivery Fee:</b> ${order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees}
+💰 <b>Total:</b> RM${order.totalAmount}
 
-_Saved to Airtable ✓_`;
+<i>Saved to Airtable ✓</i>`;
 
-    await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'Markdown' });
+    await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
 
   } catch (err) {
     console.error('Order error:', err);
@@ -370,18 +370,18 @@ IMPORTANT RULES:
 - Always filter to only show relevant orders based on the question
 
 Format EACH order like this (one blank line between orders):
-*[number]. [Order ID]*
+<b>[number]. [Order ID]</b>
 👤 [Customer] | 📞 [Contact]
 📍 [Address]
 🐔 Chicken: [chickenQty] | 🐟 Salmon: [salmonQty]
 💰 Total: RM[total]
 📦 [Status] | 🚚 [collectionMethod]
 📅 Collection Date: [collectionDate]
-🗒️ [Notes] *(only include this line if notes is not empty)*
+🗒️ [Notes] (only include this line if notes is not empty)
 
 After listing all orders, add this summary block:
 ───────────────
-📊 *Summary*
+📊 <b>Summary</b>
 🧾 Total Orders: [n]
 🐔 Total Chicken: [sum]
 🐟 Total Salmon: [sum]
@@ -413,12 +413,18 @@ ${JSON.stringify(toSummary(recentOrders), null, 2)}`
   }
 }
 
+// ── Escape special Markdown characters in dynamic data ───────────────────────
+function escapeMd(text) {
+  if (!text && text !== 0) return '';
+  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
 // ── Send long messages in chunks ─────────────────────────────────────────────
 async function sendChunked(text) {
   const MAX = 3800; // safe margin below Telegram's 4096 limit
 
   if (text.length <= MAX) {
-    await bot.sendMessage(GROUP_CHAT_ID, text, { parse_mode: 'Markdown' });
+    await bot.sendMessage(GROUP_CHAT_ID, text, { parse_mode: 'HTML' });
     return;
   }
 
@@ -429,11 +435,11 @@ async function sendChunked(text) {
   for (const part of parts) {
     if ((chunk + '\n\n' + part).length > MAX) {
       if (chunk) {
-        await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'Markdown' });
+        await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'HTML' });
         chunk = part;
       } else {
         // Single part too long — split by line
-        await bot.sendMessage(GROUP_CHAT_ID, part.trim(), { parse_mode: 'Markdown' });
+        await bot.sendMessage(GROUP_CHAT_ID, part.trim(), { parse_mode: 'HTML' });
       }
     } else {
       chunk = chunk ? chunk + '\n\n' + part : part;
@@ -442,7 +448,7 @@ async function sendChunked(text) {
 
   // Send remaining chunk
   if (chunk.trim()) {
-    await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'Markdown' });
+    await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'HTML' });
   }
 }
 
