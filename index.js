@@ -230,20 +230,48 @@ async function handleQuestion(question) {
       maxRecords: 100
     }).all();
 
-    const toSummary = (records) => records.map(r => ({
-      orderId:          r.get('Order ID'),
-      customer:         r.get('Customer'),
-      contact:          r.get('Contact Number (from Customer)') || '',
-      address:          r.get('Address (from Customer)') || '',
-      date:             r.get('Order Date'),
-      collectionDate:   r.get('Collection Date'),
-      status:           r.get('Process Status'),
-      chickenQty:       r.get('Chicken Quantity') || 0,
-      salmonQty:        r.get('Salmon Quantity') || 0,
-      total:            r.get('Total Amount') || 0,
-      collectionMethod: r.get('Collection Method'),
-      notes:            r.get('Notes') || ''
-    }));
+    // Fetch customer details for each order record
+    const enrichOrders = async (records) => {
+      const results = [];
+      for (const r of records) {
+        // Get linked customer record IDs
+        const customerLinks = r.get('Customer') || [];
+        let contact = '';
+        let address = '';
+
+        if (customerLinks.length > 0) {
+          try {
+            const custId  = customerLinks[0];
+            const custRec = await base(T_CUSTOMERS).find(custId);
+            contact = custRec.get('Contact Number') || '';
+            address = custRec.get('Address') || '';
+          } catch (e) {
+            console.warn('Could not fetch customer:', e.message);
+          }
+        }
+
+        results.push({
+          orderId:          r.get('Order ID'),
+          customer:         Array.isArray(r.get('Customer'))
+                              ? (r.get('Customer')[0] || '') : (r.get('Customer') || ''),
+          contact,
+          address,
+          date:             r.get('Order Date'),
+          collectionDate:   r.get('Collection Date'),
+          status:           r.get('Process Status'),
+          chickenQty:       r.get('Chicken Quantity') || 0,
+          salmonQty:        r.get('Salmon Quantity') || 0,
+          total:            r.get('Total Amount') || 0,
+          collectionMethod: r.get('Collection Method'),
+          notes:            r.get('Notes') || ''
+        });
+      }
+      return results;
+    };
+
+    // Enrich orders with customer contact and address
+    const enrichedToday  = await enrichOrders(todayOrders);
+    const enrichedRecent = await enrichOrders(recentOrders);
 
     // Ask Claude to return structured JSON
     const res = await anthropic.messages.create({
@@ -291,8 +319,8 @@ Return ONLY valid JSON, no explanation, no markdown:
 Today is ${today}.
 Question: ${question}
 
-Today's orders: ${JSON.stringify(toSummary(todayOrders))}
-Recent orders (last 100): ${JSON.stringify(toSummary(recentOrders))}`
+Today's orders: ${JSON.stringify(enrichedToday)}
+Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       }]
     });
 
