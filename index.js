@@ -106,7 +106,11 @@ Return this exact structure:
 Rules:
 - catNames: extract ALL cat names as array, split by comma, "and", or "/". e.g. "Mochi, Ebbi, Money" → ["Mochi", "Ebbi", "Money"]
 - collectionMethod: default "Courier Required". Use "Self Pick Up" if they mention pickup/self pickup. Use "Self Deliver" if they mention Lalamove/Grab/self deliver
-- collectionDate: the expected delivery/collection date mentioned in the form. Format as YYYY-MM-DD. Leave "" if not mentioned
+- collectionDate: the expected delivery/collection date mentioned in the form. Format as YYYY-MM-DD. Leave "" if not mentioned.
+  IMPORTANT: Convert day names correctly. The current year is 2026. 
+  "Monday 15 June" = 2026-06-15, "Tuesday 16 June" = 2026-06-16.
+  Always use the explicit date number if provided — do NOT infer the date from the day name alone.
+  If only a day name is given (e.g. "Monday"), leave collectionDate blank.
 - paymentMethod: default "Online". Change only if form explicitly states otherwise (e.g. cash)
 - items: one entry per product type, skip if quantity 0
 - price = unit price as number only (no RM)
@@ -337,15 +341,19 @@ async function handleQuestion(question) {
     }).all();
 
     const toSummary = (records) => records.map(r => ({
-      orderId:        r.get('Order ID'),
-      customer:       r.get('Customer'),
-      date:           r.get('Order Date'),
-      status:         r.get('Process Status'),
-      chickenQty:     r.get('Chicken Quantity'),
-      salmonQty:      r.get('Salmon Quantity'),
-      total:          r.get('Total Amount'),
-      deliveryFees:   r.get('Delivery Fees'),
-      collectionMethod: r.get('Collection Method')
+      orderId:          r.get('Order ID'),
+      customer:         r.get('Customer'),
+      contact:          r.get('Contact Number (from Customer)') || r.get('Contact'),
+      address:          r.get('Address (from Customer)') || r.get('Address'),
+      date:             r.get('Order Date'),
+      collectionDate:   r.get('Collection Date'),
+      status:           r.get('Process Status'),
+      chickenQty:       r.get('Chicken Quantity'),
+      salmonQty:        r.get('Salmon Quantity'),
+      total:            r.get('Total Amount'),
+      deliveryFees:     r.get('Delivery Fees'),
+      collectionMethod: r.get('Collection Method'),
+      notes:            r.get('Notes') || ''
     }));
 
     const res = await anthropic.messages.create({
@@ -354,15 +362,44 @@ async function handleQuestion(question) {
       messages: [{
         role: 'user',
         content: `You are PawBot, a friendly assistant for Project Paw, a Malaysian cat food company.
-Answer concisely using the data below. Use friendly tone, bold with *asterisks*, emoji where helpful.
+Answer using the order data below. Format for Telegram mobile — NO tables, use plain text and emoji.
+
+IMPORTANT RULES:
+- For questions about orders "to deliver", "to send", "shipment" on a date → filter by collectionDate
+- For questions about orders "received", "placed", "today's orders" on a date → filter by date (Order Date)
+- Always filter to only show relevant orders based on the question
+
+Format EACH order like this (one blank line between orders):
+*[number]. [Order ID]*
+👤 [Customer] | 📞 [Contact]
+📍 [Address]
+🐔 Chicken: [chickenQty] | 🐟 Salmon: [salmonQty]
+💰 Total: RM[total]
+📦 [Status] | 🚚 [collectionMethod]
+📅 Collection Date: [collectionDate]
+🗒️ [Notes] *(only include this line if notes is not empty)*
+
+After listing all orders, add this summary block:
+───────────────
+📊 *Summary*
+🧾 Total Orders: [n]
+🐔 Total Chicken: [sum]
+🐟 Total Salmon: [sum]
+💵 Total Revenue: RM[sum]
+🚚 Courier Required: [n]
+🛵 Self Deliver: [n]
+🏪 Self Pick Up: [n]
+───────────────
+
+If no orders match, reply friendly that there are no orders for that criteria.
 Today is ${today}.
 
 Question: ${question}
 
-Today's orders:
+Today's orders (filtered by Order Date):
 ${JSON.stringify(toSummary(todayOrders), null, 2)}
 
-Recent orders (last 100):
+Recent orders (last 100, use this for date/collection date filtering):
 ${JSON.stringify(toSummary(recentOrders), null, 2)}`
       }]
     });
