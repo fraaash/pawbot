@@ -43,6 +43,7 @@ async function handleMessage(msg) {
   const classification = await classifyMessage(text);
   if      (classification === 'ORDER_FORM') await handleOrderForm(text);
   else if (classification === 'QUESTION')   await handleQuestion(text);
+  else if (classification === 'UPDATE')     await handleUpdate(text);
 }
 
 // ── Classify ──────────────────────────────────────────────────────────────────
@@ -52,9 +53,10 @@ async function classifyMessage(text) {
     max_tokens: 20,
     messages: [{
       role: 'user',
-      content: `Classify this message as ORDER_FORM, QUESTION, or OTHER.
+      content: `Classify this message as ORDER_FORM, QUESTION, UPDATE, or OTHER.
 ORDER_FORM = filled cat food order with customer name, address, flavors, total.
 QUESTION = question about orders, sales, customers, inventory.
+UPDATE = request to change/update/modify an order or customer field e.g. change collection date, update address, mark as packed/shipped/delivered.
 OTHER = everything else.
 Reply with ONE word only.\n\nMessage:\n${text}`
     }]
@@ -443,6 +445,63 @@ async function generateOrderId() {
     if (match) nextNum = parseInt(match[1]) + 1;
   }
   return String(nextNum).padStart(5, '0');
+}
+
+// ── Handle update request ────────────────────────────────────────────────────
+async function handleUpdate(text) {
+  try {
+    const res = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: 'You are an update assistant for Project Paw. Extract the update and return ONLY valid JSON. '
+          + 'Possible tables: Purchase Orders or Customers. '
+          + 'Purchase Order fields: Collection Date (YYYY-MM-DD), Process Status (Pending/Packed/Shipped/Delivered/Collected), Collection Method (Courier Required/Self Pick Up/Self Deliver), Notes, Payment Method. '
+          + 'Customer fields: Name, Contact Number, Address, Pet Name. '
+          + 'Return this structure: {"table":"Purchase Orders","searchField":"Order ID","searchValue":"","updates":{"fieldName":"newValue"}}. '
+          + 'If updating by customer name use searchField Customer Name for Purchase Orders or Name for Customers. '
+          + 'Current year is 2026. '
+          + 'Message: ' + text
+      }]
+    });
+
+    let raw = res.content[0].text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
+    let updateData;
+    try {
+      updateData = JSON.parse(raw);
+    } catch (e) {
+      await bot.sendMessage(GROUP_CHAT_ID, 'Could not understand the update. Example: Update order 00369 collection date to 20 June');
+      return;
+    }
+
+    const table   = updateData.table || 'Purchase Orders';
+    const formula = '{' + updateData.searchField + '} = \'' + String(updateData.searchValue).replace(/'/g, "\\'") + '\'';
+    const records = await base(table).select({ filterByFormula: formula, maxRecords: 1 }).all();
+
+    if (records.length === 0) {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        '<b>Not found:</b> ' + updateData.searchField + ': ' + updateData.searchValue,
+        { parse_mode: 'HTML' });
+      return;
+    }
+
+    await base(table).update(records[0].id, updateData.updates);
+
+    const changesList = Object.entries(updateData.updates)
+      .map(([field, value]) => '• <b>' + field + '</b> → ' + value)
+      .join('\n');
+
+    await bot.sendMessage(GROUP_CHAT_ID,
+      '✅ <b>Updated!</b>\n\n'
+      + updateData.searchField + ': <b>' + updateData.searchValue + '</b>\n\n'
+      + changesList + '\n\n<i>Airtable updated ✓</i>',
+      { parse_mode: 'HTML' });
+
+  } catch (err) {
+    console.error('Update error:', err);
+    await bot.sendMessage(GROUP_CHAT_ID, '⚠️ Update failed: ' + err.message);
+  }
 }
 
 // ── Start server ──────────────────────────────────────────────────────────────
