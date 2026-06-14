@@ -230,39 +230,25 @@ async function handleQuestion(question) {
       maxRecords: 100
     }).all();
 
-    // Map order records directly
-    // Customer is a linked field (returns array), Address/Contact are lookups
+    // All fields are lookup fields — read directly, no extra API calls
     const enrichOrders = (records) => records.map(r => {
-      // Debug: log raw customer field to see what Airtable returns
-      const customerRaw = r.get('Customer');
-      console.log('DEBUG Customer raw:', JSON.stringify(customerRaw));
-      console.log('DEBUG Contact raw:', JSON.stringify(r.get('Contact')));
-      console.log('DEBUG Address raw:', JSON.stringify(r.get('Address')));
-
-      const customerName = Array.isArray(customerRaw)
-        ? (customerRaw[0]?.name || customerRaw[0] || '')
-        : (customerRaw || '');
-
-      // Lookup fields may also return arrays
-      const contactRaw = r.get('Contact');
-      const contact = Array.isArray(contactRaw) ? contactRaw[0] : (contactRaw || '');
-
-      const addressRaw = r.get('Address');
-      const address = Array.isArray(addressRaw) ? addressRaw[0] : (addressRaw || '');
-
+      const getRaw = (field) => {
+        const val = r.get(field);
+        return Array.isArray(val) ? (val[0] || '') : (val || '');
+      };
       return {
-      orderId:          r.get('Order ID'),
-      customer:         customerName,
-      contact:          contact,
-      address:          address,
-      date:             r.get('Order Date'),
-      collectionDate:   r.get('Collection Date'),
-      status:           r.get('Process Status'),
-      chickenQty:       r.get('Chicken Quantity') || 0,
-      salmonQty:        r.get('Salmon Quantity') || 0,
-      total:            r.get('Total Amount') || 0,
-      collectionMethod: r.get('Collection Method'),
-      notes:            r.get('Notes') || ''
+        orderId:          r.get('Order ID'),
+        customer:         getRaw('Customer Name'),
+        contact:          getRaw('Contact'),
+        address:          getRaw('Address'),
+        date:             r.get('Order Date'),
+        collectionDate:   r.get('Collection Date'),
+        status:           r.get('Process Status'),
+        chickenQty:       r.get('Chicken Quantity') || 0,
+        salmonQty:        r.get('Salmon Quantity') || 0,
+        total:            r.get('Total Amount') || 0,
+        collectionMethod: r.get('Collection Method'),
+        notes:            r.get('Notes') || ''
       };
     });
 
