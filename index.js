@@ -358,54 +358,93 @@ async function handleQuestion(question) {
 
     const res = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 600,
+      max_tokens: 4000,
       messages: [{
         role: 'user',
         content: `You are PawBot, a friendly assistant for Project Paw, a Malaysian cat food company.
-Answer using the order data below. Format for Telegram mobile — NO tables, use plain text and emoji.
 
 IMPORTANT RULES:
-- For questions about orders "to deliver", "to send", "shipment" on a date → filter by collectionDate
+- For questions about orders "to deliver", "to send", "fulfill", "ship" on a date → filter by collectionDate
 - For questions about orders "received", "placed", "today's orders" on a date → filter by date (Order Date)
-- Always filter to only show relevant orders based on the question
+- Only include orders that match the question criteria
 
-Format EACH order like this (one blank line between orders):
-<b>[number]. [Order ID]</b>
-👤 [Customer] | 📞 [Contact]
-📍 [Address]
-🐔 Chicken: [chickenQty] | 🐟 Salmon: [salmonQty]
-💰 Total: RM[total]
-📦 [Status] | 🚚 [collectionMethod]
-📅 Collection Date: [collectionDate]
-🗒️ [Notes] (only include this line if notes is not empty)
+Return ONLY valid JSON, no explanation, no markdown. Structure:
+{
+  "orders": [
+    {
+      "orderId": "",
+      "customer": "",
+      "contact": "",
+      "address": "",
+      "chickenQty": 0,
+      "salmonQty": 0,
+      "total": 0,
+      "status": "",
+      "collectionMethod": "",
+      "collectionDate": "",
+      "notes": ""
+    }
+  ],
+  "summary": {
+    "totalOrders": 0,
+    "totalChicken": 0,
+    "totalSalmon": 0,
+    "totalRevenue": 0,
+    "courierCount": 0,
+    "selfDeliverCount": 0,
+    "selfPickUpCount": 0
+  },
+  "noResults": false,
+  "noResultsMessage": ""
+}
 
-After listing all orders, add this summary block:
-───────────────
-📊 <b>Summary</b>
-🧾 Total Orders: [n]
-🐔 Total Chicken: [sum]
-🐟 Total Salmon: [sum]
-💵 Total Revenue: RM[sum]
-🚚 Courier Required: [n]
-🛵 Self Deliver: [n]
-🏪 Self Pick Up: [n]
-───────────────
-
-If no orders match, reply friendly that there are no orders for that criteria.
 Today is ${today}.
-
 Question: ${question}
 
-Today's orders (filtered by Order Date):
-${JSON.stringify(toSummary(todayOrders), null, 2)}
-
-Recent orders (last 100, use this for date/collection date filtering):
-${JSON.stringify(toSummary(recentOrders), null, 2)}`
+Today's orders (by Order Date): ${JSON.stringify(toSummary(todayOrders), null, 2)}
+Recent orders (last 100): ${JSON.stringify(toSummary(recentOrders), null, 2)}`
       }]
     });
 
-    // Split reply into chunks to stay within Telegram's 4096 char limit
-    await sendChunked(res.content[0].text.trim());
+    // Parse JSON response and send each order as separate message
+    let raw = res.content[0].text.trim();
+    raw = raw.replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
+    const data = JSON.parse(raw);
+
+    if (data.noResults || data.orders.length === 0) {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        data.noResultsMessage || '🔍 No orders found for that criteria.', { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Send each order as its own message
+    for (let i = 0; i < data.orders.length; i++) {
+      const o = data.orders[i];
+      let msg = `<b>${i + 1}. ${o.orderId}</b>\n`;
+      msg += `👤 ${o.customer} | 📞 ${o.contact}\n`;
+      msg += `📍 ${o.address}\n`;
+      msg += `🐔 Chicken: ${o.chickenQty} | 🐟 Salmon: ${o.salmonQty}\n`;
+      msg += `💰 Total: RM${o.total}\n`;
+      msg += `📦 ${o.status} | 🚚 ${o.collectionMethod}\n`;
+      if (o.collectionDate) msg += `📅 Collection Date: ${o.collectionDate}\n`;
+      if (o.notes)          msg += `🗒️ ${o.notes}\n`;
+      await bot.sendMessage(GROUP_CHAT_ID, msg.trim(), { parse_mode: 'HTML' });
+    }
+
+    // Send summary as final message
+    const s = data.summary;
+    const summary =
+\`───────────────
+📊 <b>Summary</b>
+🧾 Total Orders: \${s.totalOrders}
+🐔 Total Chicken: \${s.totalChicken}
+🐟 Total Salmon: \${s.totalSalmon}
+💵 Total Revenue: RM\${s.totalRevenue}
+🚚 Courier Required: \${s.courierCount}
+🛵 Self Deliver: \${s.selfDeliverCount}
+🏪 Self Pick Up: \${s.selfPickUpCount}
+───────────────\`;
+    await bot.sendMessage(GROUP_CHAT_ID, summary, { parse_mode: 'HTML' });
 
   } catch (err) {
     console.error('Question error:', err);
