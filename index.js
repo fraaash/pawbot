@@ -404,12 +404,45 @@ ${JSON.stringify(toSummary(recentOrders), null, 2)}`
       }]
     });
 
-    await bot.sendMessage(GROUP_CHAT_ID, res.content[0].text.trim(),
-      { parse_mode: 'Markdown' });
+    // Split reply into chunks to stay within Telegram's 4096 char limit
+    await sendChunked(res.content[0].text.trim());
 
   } catch (err) {
     console.error('Question error:', err);
     await bot.sendMessage(GROUP_CHAT_ID, '⚠️ Could not fetch data right now. Try again shortly.');
+  }
+}
+
+// ── Send long messages in chunks ─────────────────────────────────────────────
+async function sendChunked(text) {
+  const MAX = 3800; // safe margin below Telegram's 4096 limit
+
+  if (text.length <= MAX) {
+    await bot.sendMessage(GROUP_CHAT_ID, text, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // Split on double newline (between orders) to avoid cutting mid-order
+  const parts = text.split(/\n\n/);
+  let chunk = '';
+
+  for (const part of parts) {
+    if ((chunk + '\n\n' + part).length > MAX) {
+      if (chunk) {
+        await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'Markdown' });
+        chunk = part;
+      } else {
+        // Single part too long — split by line
+        await bot.sendMessage(GROUP_CHAT_ID, part.trim(), { parse_mode: 'Markdown' });
+      }
+    } else {
+      chunk = chunk ? chunk + '\n\n' + part : part;
+    }
+  }
+
+  // Send remaining chunk
+  if (chunk.trim()) {
+    await bot.sendMessage(GROUP_CHAT_ID, chunk.trim(), { parse_mode: 'Markdown' });
   }
 }
 
