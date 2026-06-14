@@ -459,8 +459,9 @@ async function handleUpdate(text) {
           + 'Possible tables: Purchase Orders or Customers. '
           + 'Purchase Order fields: Collection Date (YYYY-MM-DD), Process Status (Pending/Packed/Shipped/Delivered/Collected), Collection Method (Courier Required/Self Pick Up/Self Deliver), Notes, Payment Method. '
           + 'Customer fields: Name, Contact Number, Address, Pet Name. '
-          + 'Return this structure: {"table":"Purchase Orders","searchField":"Order ID","searchValue":"","updates":{"fieldName":"newValue"}}. '
+          + 'Return this structure: {"table":"Purchase Orders","searchField":"Order Number","searchValue":"","updates":{"fieldName":"newValue"}}. '
           + 'If updating by customer name use searchField Customer Name for Purchase Orders or Name for Customers. '
+          + 'Always use Order Number (e.g. 00365) as the searchField for Purchase Orders, NOT Order ID. '
           + 'Current year is 2026. '
           + 'Message: ' + text
       }]
