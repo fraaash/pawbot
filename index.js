@@ -233,8 +233,12 @@ async function handleQuestion(question) {
     // Map order records directly
     // Customer is a linked field (returns array), Address/Contact are lookups
     const enrichOrders = (records) => records.map(r => {
-      // Linked record fields return arrays — get the display name from first element
+      // Debug: log raw customer field to see what Airtable returns
       const customerRaw = r.get('Customer');
+      console.log('DEBUG Customer raw:', JSON.stringify(customerRaw));
+      console.log('DEBUG Contact raw:', JSON.stringify(r.get('Contact')));
+      console.log('DEBUG Address raw:', JSON.stringify(r.get('Address')));
+
       const customerName = Array.isArray(customerRaw)
         ? (customerRaw[0]?.name || customerRaw[0] || '')
         : (customerRaw || '');
