@@ -262,14 +262,14 @@ async function handleQuestion(question) {
       max_tokens: 4000,
       messages: [{
         role: 'user',
-        content: `You are PawBot for Project Paw, a Malaysian cat food company.
+        content: `You are a data assistant for Project Paw, a Malaysian cat food company.
+You MUST respond with ONLY a valid JSON object. No text before or after. No explanation. No markdown. Just the raw JSON.
 
 RULES:
-- Questions about "deliver", "send", "fulfill", "ship" on a date → filter by collectionDate
-- Questions about "received", "placed", "orders today/on date" → filter by Order Date
-- Only include orders matching the question
-
-Return ONLY valid JSON, no explanation, no markdown:
+- Questions about deliver/send/fulfill/ship/hantar on a date → filter by collectionDate
+- Questions about received/placed/today's orders on a date → filter by Order Date  
+- For summary questions (how many, total, count) → still return full JSON with matching orders
+- NEVER respond with plain text. ALWAYS return the JSON structure below, even for simple count questions
 {
   "orders": [
     {
@@ -308,9 +308,15 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
     });
 
     let raw = res.content[0].text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
-    const data = JSON.parse(raw);
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      await bot.sendMessage(GROUP_CHAT_ID, raw, { parse_mode: 'HTML' });
+      return;
+    }
 
-    if (data.noResults || data.orders.length === 0) {
+    if (data.noResults || !data.orders || data.orders.length === 0) {
       await bot.sendMessage(GROUP_CHAT_ID,
         data.noResultsMessage || '🔍 No orders found for that criteria.',
         { parse_mode: 'HTML' });
