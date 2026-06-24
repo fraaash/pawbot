@@ -121,7 +121,7 @@ Rules:
 - price = unit price as number only
 - deliveryFees and totalAmount = numbers only
 - Extract postcode from address if present
-- Detect state from address if not explicitly stated
+- Detect state from address if not explicitly stated. Note: "Pulau Pinang" or "P. Pinang" should be normalized to "Penang", "WP Kuala Lumpur" to "Kuala Lumpur", "Malacca" to "Melaka"
 - notes: any special instructions. Leave "" if none
 
 Order form:
@@ -275,9 +275,13 @@ You MUST respond with ONLY a valid JSON object. No text before or after. No expl
 RULES:
 - Questions about deliver/send/fulfill/ship/hantar on a date → filter by collectionDate
 - Questions about received/placed/today's orders on a date → filter by Order Date  
-- For summary questions (how many, total, count) → still return full JSON with matching orders
-- NEVER respond with plain text. ALWAYS return the JSON structure below, even for simple count questions
+- Detect if the question asks for a SUMMARY only (e.g. "summary of orders", "summary of sales", "how many orders", "total sales today") vs a DETAILED list (e.g. "list orders", "show orders", "what are the orders to deliver", "give me details")
+- If it's a summary-only question, set "summaryOnly": true and you may leave "orders" as an empty array — only "summary" numbers are needed
+- If it's a detailed question, set "summaryOnly": false and include the full "orders" array
+- When in doubt (ambiguous question), default to "summaryOnly": false (show full details)
+- NEVER respond with plain text. ALWAYS return the JSON structure below
 {
+  "summaryOnly": false,
   "orders": [
     {
       "orderId": "",
@@ -323,27 +327,29 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       return;
     }
 
-    if (data.noResults || !data.orders || data.orders.length === 0) {
+    if (data.noResults || (!data.summaryOnly && (!data.orders || data.orders.length === 0))) {
       await bot.sendMessage(GROUP_CHAT_ID,
         data.noResultsMessage || '🔍 No orders found for that criteria.',
         { parse_mode: 'HTML' });
       return;
     }
 
-    // Send each order as its own message
-    for (let i = 0; i < data.orders.length; i++) {
-      const o   = data.orders[i];
-      const lines = [
-        `<b>${i + 1}. ${o.orderId}</b>`,
-        `👤 ${o.customer} | 📞 ${o.contact}`,
-        `📍 ${o.address}`,
-        `🐔 Chicken: ${o.chickenQty} | 🐟 Salmon: ${o.salmonQty}`,
-        `💰 Total: RM${o.total}`,
-        `📦 ${o.status} | 🚚 ${o.collectionMethod}`
-      ];
-      if (o.collectionDate) lines.push(`📅 Collection Date: ${o.collectionDate}`);
-      if (o.notes)          lines.push(`🗒️ ${o.notes}`);
-      await bot.sendMessage(GROUP_CHAT_ID, lines.join('\n'), { parse_mode: 'HTML' });
+    // Send each order as its own message — skip entirely if summary-only was requested
+    if (!data.summaryOnly && data.orders) {
+      for (let i = 0; i < data.orders.length; i++) {
+        const o   = data.orders[i];
+        const lines = [
+          `<b>${i + 1}. ${o.orderId}</b>`,
+          `👤 ${o.customer} | 📞 ${o.contact}`,
+          `📍 ${o.address}`,
+          `🐔 Chicken: ${o.chickenQty} | 🐟 Salmon: ${o.salmonQty}`,
+          `💰 Total: RM${o.total}`,
+          `📦 ${o.status} | 🚚 ${o.collectionMethod}`
+        ];
+        if (o.collectionDate) lines.push(`📅 Collection Date: ${o.collectionDate}`);
+        if (o.notes)          lines.push(`🗒️ ${o.notes}`);
+        await bot.sendMessage(GROUP_CHAT_ID, lines.join('\n'), { parse_mode: 'HTML' });
+      }
     }
 
     // Send summary as final message
@@ -542,9 +548,25 @@ async function findOrCreateCustomer(order) {
     'Negeri Sembilan', 'Pahang', 'Perlis', 'Terengganu',
     'Putrajaya', 'Labuan'
   ];
-  const stateValue = validStates.find(
-    s => s.toLowerCase() === (order.state || '').toLowerCase()
-  ) || null;
+  // Common alternate names / local spellings that should map to the valid options above
+  const stateAliases = {
+    'pulau pinang':     'Penang',
+    'p. pinang':        'Penang',
+    'wp kuala lumpur':  'Kuala Lumpur',
+    'wilayah persekutuan kuala lumpur': 'Kuala Lumpur',
+    'kl':               'Kuala Lumpur',
+    'n. sembilan':      'Negeri Sembilan',
+    'n9':               'Negeri Sembilan',
+    'malacca':          'Melaka',
+    'wp labuan':        'Labuan',
+    'wp putrajaya':     'Putrajaya'
+  };
+
+  const rawState = (order.state || '').trim().toLowerCase();
+  const stateValue =
+    validStates.find(s => s.toLowerCase() === rawState) ||
+    stateAliases[rawState] ||
+    null;
 
   const newFields = {
     'Name':           order.customerName,
