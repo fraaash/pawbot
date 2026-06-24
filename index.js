@@ -15,6 +15,33 @@ const base       = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY })
 
 const GROUP_CHAT_ID = process.env.TELEGRAM_GROUP_CHAT_ID;
 
+// ── Retry wrapper for Claude API calls ───────────────────────────────────────
+// Handles transient network errors like ERR_STREAM_PREMATURE_CLOSE
+async function callClaude(params, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await anthropic.messages.create(params);
+    } catch (err) {
+      const isRetryable =
+        err.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+        err.message?.includes('Premature close') ||
+        err.status === 429 ||
+        err.status === 500 ||
+        err.status === 502 ||
+        err.status === 503 ||
+        err.status === 529;
+
+      if (isRetryable && attempt < retries) {
+        const waitMs = 1000 * (attempt + 1);
+        console.warn(`Claude API call failed (attempt ${attempt + 1}), retrying in ${waitMs}ms:`, err.message);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ── Table names ───────────────────────────────────────────────────────────────
 const T_ORDERS    = 'Purchase Orders';
 const T_CUSTOMERS = 'Customers';
@@ -53,7 +80,7 @@ async function handleMessage(msg) {
 
 // ── Classify ──────────────────────────────────────────────────────────────────
 async function classifyMessage(text) {
-  const res = await anthropic.messages.create({
+  const res = await callClaude({
     model: 'claude-sonnet-4-6',
     max_tokens: 20,
     messages: [{
@@ -78,7 +105,7 @@ async function handleOrderForm(text) {
     const today  = myTime.toISOString().split('T')[0];
 
     // 1. Extract order data with Claude
-    const res = await anthropic.messages.create({
+    const res = await callClaude({
       model: 'claude-sonnet-4-6',
       max_tokens: 800,
       messages: [{
@@ -264,7 +291,7 @@ async function handleQuestion(question) {
     const enrichedRecent = enrichOrders(recentOrders);
 
     // Ask Claude to return structured JSON
-    const res = await anthropic.messages.create({
+    const res = await callClaude({
       model: 'claude-sonnet-4-6',
       max_tokens: 4000,
       messages: [{
@@ -611,7 +638,7 @@ async function generateOrderId() {
 // ── Handle update request ────────────────────────────────────────────────────
 async function handleUpdate(text) {
   try {
-    const res = await anthropic.messages.create({
+    const res = await callClaude({
       model: 'claude-sonnet-4-6',
       max_tokens: 400,
       messages: [{
