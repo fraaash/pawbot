@@ -32,6 +32,11 @@ app.post('/webhook', (req, res) => {
   if (update.message) handleMessage(update.message);
 });
 
+app.post('/shopify-webhook', (req, res) => {
+  res.sendStatus(200); // respond immediately, Shopify requires <5s response
+  handleShopifyOrder(req.body).catch(err => console.error('Shopify order error:', err));
+});
+
 app.get('/', (req, res) => res.send('PawBot is running 🐾'));
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -364,15 +369,149 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
   }
 }
 
+// ── Handle Shopify order webhook ──────────────────────────────────────────────
+async function handleShopifyOrder(shopifyOrder) {
+  try {
+    const now    = new Date();
+    const myTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const today  = myTime.toISOString().split('T')[0];
+
+    // Map Shopify customer + shipping address to our order format
+    const shipping = shopifyOrder.shipping_address || {};
+    const customer  = shopifyOrder.customer || {};
+
+    const fullName = [shipping.first_name, shipping.last_name].filter(Boolean).join(' ')
+                      || [customer.first_name, customer.last_name].filter(Boolean).join(' ')
+                      || 'Shopify Customer';
+
+    const addressParts = [
+      shipping.address1, shipping.address2, shipping.city,
+      shipping.province, shipping.zip
+    ].filter(Boolean);
+    const fullAddress = addressParts.join(', ');
+
+    const order = {
+      customerName:   fullName,
+      contactNumber:  shipping.phone || customer.phone || '',
+      address:        fullAddress,
+      state:          shipping.province || '',
+      postcode:       shipping.zip || '',
+      catNames:       [],
+      catNamesStr:    '',
+      numPets:        0
+    };
+
+    // Find or create customer in Airtable
+    const customerRecId = await findOrCreateCustomer(order);
+
+    // Extract numeric order number from Shopify order name e.g. "SPF1124" -> "1124", "#1124" -> "1124"
+    const shopifyOrderName = shopifyOrder.name || String(shopifyOrder.order_number || '');
+    const orderNumberMatch = shopifyOrderName.match(/(\d+)/);
+    const orderNumber      = orderNumberMatch ? orderNumberMatch[1] : shopifyOrderName;
+
+    // Map Shopify line items to our Product table by matching product title
+    const lineItems = shopifyOrder.line_items || [];
+
+    // Create Purchase Order
+    const poFields = {
+      'Order Number':      orderNumber,
+      'Customer':          [customerRecId],
+      'Order Date':        today,
+      'Process Status':    'Pending',
+      'Collection Method': 'Courier Required',
+      'Payment Method':    'Online',
+      'Channel':           'Website',
+      'Notes':             shopifyOrder.note || ''
+    };
+
+    const poRecord = await base(T_ORDERS).create([{ fields: poFields }]);
+    const poRecId  = poRecord[0].id;
+
+    // Create Order Line Items — match Shopify product title to Airtable Product
+    const matchedItems = [];
+    for (const item of lineItems) {
+      const productRec = await findProductByName(item.title) ||
+                          await findProductByNameFuzzy(item.title);
+      if (!productRec) {
+        console.warn('Shopify product not matched:', item.title);
+        continue;
+      }
+      await base(T_LINEITEMS).create([{
+        fields: {
+          'Purchase Orders': [poRecId],
+          'Item Name':       [productRec.id],
+          'Quantity':        item.quantity
+        }
+      }]);
+      matchedItems.push(`${item.title} x${item.quantity}`);
+    }
+
+    // Add shipping fee as line item if present
+    const shippingTotal = parseFloat(shopifyOrder.total_shipping_price_set?.shop_money?.amount || 0);
+    if (shippingTotal > 0) {
+      const deliveryRec = await findProductByName('Delivery Fees');
+      if (deliveryRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [deliveryRec.id],
+            'Quantity':        Math.round(shippingTotal)
+          }
+        }]);
+      }
+    }
+
+    // Notify Telegram group
+    const totalAmount = shopifyOrder.total_price || '0.00';
+    const msg = [
+      '🛒 <b>New Shopify Order!</b>',
+      '',
+      `🆔 <b>Shopify Order #:</b> ${orderNumber} (${shopifyOrderName})`,
+      `👤 <b>Customer:</b> ${order.customerName}`,
+      `📞 <b>Contact:</b> ${order.contactNumber || 'N/A'}`,
+      `📍 <b>Address:</b> ${order.address || 'N/A'}`,
+      '',
+      `🛍️ <b>Items:</b>\n${matchedItems.map(i => '• ' + i).join('\n') || 'See Shopify order'}`,
+      `💰 <b>Total:</b> RM${totalAmount}`,
+      '',
+      '<i>Saved to Airtable ✓</i>'
+    ].join('\n');
+
+    await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
+
+  } catch (err) {
+    console.error('Shopify order processing error:', err);
+    await bot.sendMessage(GROUP_CHAT_ID,
+      '⚠️ Error processing a Shopify order. Check Render logs.\nError: ' + err.message);
+  }
+}
+
+// ── Fuzzy product match fallback (for Shopify product name variations) ───────
+async function findProductByNameFuzzy(shopifyTitle) {
+  const allProducts = await base(T_PRODUCTS).select({ maxRecords: 20 }).all();
+  const lower = shopifyTitle.toLowerCase();
+
+  // Try matching by key product words
+  if (lower.includes('bawk bawk') || lower.includes('chicken')) {
+    return allProducts.find(p => (p.get('Name') || '').toLowerCase().includes('bawk bawk')) || null;
+  }
+  if (lower.includes('gulu gulu') || lower.includes('salmon')) {
+    return allProducts.find(p => (p.get('Name') || '').toLowerCase().includes('gulu gulu')) || null;
+  }
+  return null;
+}
+
 // ── Find or create customer ───────────────────────────────────────────────────
 async function findOrCreateCustomer(order) {
   let existing = [];
 
-  // 1. Match by contact number first
+  // 1. Match by contact number — compare last 9 digits only
+  //    Handles +60164152237, 0164152237, (016) 415-2237 all as the same number
   if (order.contactNumber) {
-    const cleaned = order.contactNumber.replace(/[^0-9]/g, '');
+    const digitsOnly = order.contactNumber.replace(/[^0-9]/g, '');
+    const last9       = digitsOnly.slice(-9);
     existing = await base(T_CUSTOMERS).select({
-      filterByFormula: `FIND("${cleaned}", SUBSTITUTE({Contact Number}, "-", ""))`,
+      filterByFormula: `RIGHT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE({Contact Number}, "+", ""), "-", ""), "(", ""), ")", " "), 9) = "${last9}"`,
       maxRecords: 1
     }).all();
   }
@@ -476,7 +615,9 @@ async function handleUpdate(text) {
       return;
     }
 
-    const table   = updateData.table || 'Purchase Orders';
+    const table = updateData.table || 'Purchase Orders';
+    // Always use exact string match to avoid collisions between
+    // WhatsApp orders (01088) and Shopify orders (1088)
     const formula = '{' + updateData.searchField + '} = \'' + String(updateData.searchValue).replace(/'/g, "\\'") + '\'';
     const records = await base(table).select({ filterByFormula: formula, maxRecords: 1 }).all();
 
