@@ -328,7 +328,8 @@ RULES:
 - Questions about deliver/send/fulfill/ship/hantar on a date → filter by collectionDate
 - Questions about received/placed/today's orders on a date → filter by Order Date  
 - Detect if the question asks for a SUMMARY only (e.g. "summary of orders", "summary of sales", "how many orders", "total sales today") vs a DETAILED list (e.g. "list orders", "show orders", "what are the orders to deliver", "give me details")
-- If it's a summary-only question, set "summaryOnly": true and you may leave "orders" as an empty array — only "summary" numbers are needed
+- If it's a summary-only question, set "summaryOnly": true — but you MUST still include the full matching "orders" array (used internally to calculate accurate totals). The orders just won't be displayed to the user.
+- Do NOT calculate or guess the "summary" object yourself — just return the matching orders array accurately. The summary numbers will be calculated separately from your orders list.
 - If it's a detailed question, set "summaryOnly": false and include the full "orders" array
 - When in doubt (ambiguous question), default to "summaryOnly": false (show full details)
 - NEVER respond with plain text. ALWAYS return the JSON structure below
@@ -379,7 +380,7 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       return;
     }
 
-    if (data.noResults || (!data.summaryOnly && (!data.orders || data.orders.length === 0))) {
+    if (data.noResults || !data.orders || data.orders.length === 0) {
       await bot.sendMessage(GROUP_CHAT_ID,
         data.noResultsMessage || '🔍 No orders found for that criteria.',
         { parse_mode: 'HTML' });
@@ -404,8 +405,19 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       }
     }
 
-    // Send summary as final message
-    const s = data.summary;
+    // Calculate summary numbers ourselves from data.orders — never trust
+    // Claude's own arithmetic, to guarantee the summary always matches the list exactly
+    const ordersForSummary = data.orders || [];
+    const s = {
+      totalOrders:      ordersForSummary.length,
+      totalChicken:     ordersForSummary.reduce((sum, o) => sum + (Number(o.chickenQty) || 0), 0),
+      totalSalmon:      ordersForSummary.reduce((sum, o) => sum + (Number(o.salmonQty) || 0), 0),
+      totalRevenue:     ordersForSummary.reduce((sum, o) => sum + (Number(o.total) || 0), 0),
+      courierCount:     ordersForSummary.filter(o => o.collectionMethod === 'Courier Required').length,
+      selfDeliverCount: ordersForSummary.filter(o => o.collectionMethod === 'Self Deliver').length,
+      selfPickUpCount:  ordersForSummary.filter(o => o.collectionMethod === 'Self Pick Up').length
+    };
+
     const summary = [
       '───────────────',
       '📊 <b>Summary</b>',
