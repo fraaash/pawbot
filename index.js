@@ -251,8 +251,23 @@ ${text}`
 
   } catch (err) {
     console.error('Order error:', err);
-    await bot.sendMessage(GROUP_CHAT_ID,
-      '⚠️ Could not process this order. Please check the format and try again.\n\nError: ' + err.message);
+
+    const isClaudeOutage =
+      err.message?.includes('Premature close') ||
+      err.message?.includes('Overloaded') ||
+      err.status === 529 || err.status === 500 || err.status === 502 || err.status === 503;
+
+    if (isClaudeOutage) {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        '🔧 <b>Claude AI is temporarily down</b> (Anthropic service issue, not a bot bug).\n\n' +
+        '⚠️ This order was NOT saved automatically. Please key it into Airtable manually for now:\n' +
+         'https://airtable.com/' + (process.env.AIRTABLE_BASE_ID || '') + '\n\n' +
+        'PawBot will resume auto-processing once Claude is back online. Check status.claude.com for updates.',
+        { parse_mode: 'HTML' });
+    } else {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        '⚠️ Could not process this order. Please check the format and try again.\n\nError: ' + err.message);
+    }
   }
 }
 
