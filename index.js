@@ -490,7 +490,7 @@ async function handleShopifyOrder(shopifyOrder) {
       'Process Status':    'Pending',
       'Collection Method': 'Courier Required',
       'Payment Method':    'Online',
-      'Channel':           'Website',
+      'Channel':           'Shopify',
       'Notes':             shopifyOrder.note || ''
     };
 
