@@ -132,8 +132,8 @@ Products sold (use EXACT item names):
 
 FRAAASH JUNE PAYDAY SALES PROMO (temporary promotion):
 - If the message mentions "PAYDAY SALES", "FRAAASH PAYDAY", or "Free Bawk Bawk" with a RM1 charge:
-  - Add a line item: { "itemName": "Bawk Bawk Chicken (Payday Sales Promo)", "quantity": 1, "price": 0 } for the free box
-  - Add a line item: { "itemName": "Payday Sales Top-up", "quantity": 1, "price": 1 } for the RM1 charge
+  - Add a line item: { "itemName": "Bawk Bawk Fresh Chicken (June Payday Promo)", "quantity": 1, "price": 0 } for the free box
+  - Add a line item: { "itemName": "Payday Sales Top Up", "quantity": 1, "price": 1 } for the RM1 charge
   - These are IN ADDITION to the regular paid items in the order — do not replace or merge them
 
 Return this exact structure:
@@ -529,12 +529,12 @@ async function handleShopifyOrder(shopifyOrder) {
           }
         }
         // The 1 free promo box
-        const promoRec = await findProductByName('Bawk Bawk Chicken (Payday Sales Promo)');
+        const promoRec = await findProductByName('Bawk Bawk Fresh Chicken (June Payday Promo)');
         if (promoRec) {
           await base(T_LINEITEMS).create([{
             fields: { 'Purchase Orders': [poRecId], 'Item Name': [promoRec.id], 'Quantity': 1 }
           }]);
-          matchedItems.push('Bawk Bawk Chicken (Payday Sales Promo) x1');
+          matchedItems.push('Bawk Bawk Fresh Chicken (June Payday Promo) x1');
         }
         continue;
       }
@@ -555,14 +555,14 @@ async function handleShopifyOrder(shopifyOrder) {
       matchedItems.push(`${item.title} x${item.quantity}`);
     }
 
-    // Add Payday Sales Top-up line item (the net RM1 the customer paid via the promo)
+    // Add Payday Sales Top Up line item (the net RM1 the customer paid via the promo)
     if (isPaydayPromo) {
-      const topupRec = await findProductByName('Payday Sales Top-up');
+      const topupRec = await findProductByName('Payday Sales Top Up');
       if (topupRec) {
         await base(T_LINEITEMS).create([{
           fields: { 'Purchase Orders': [poRecId], 'Item Name': [topupRec.id], 'Quantity': 1 }
         }]);
-        matchedItems.push('Payday Sales Top-up x1');
+        matchedItems.push('Payday Sales Top Up x1');
       }
     }
 
