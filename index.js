@@ -130,6 +130,12 @@ Products sold (use EXACT item names):
 - "Gulu Gulu" at RM29 = "Gulu Gulu Fresh Salmon and Chicken Recipe"
 - Default to Starter Promotion if price unclear
 
+FRAAASH JUNE PAYDAY SALES PROMO (temporary promotion):
+- If the message mentions "PAYDAY SALES", "FRAAASH PAYDAY", or "Free Bawk Bawk" with a RM1 charge:
+  - Add a line item: { "itemName": "Bawk Bawk Chicken (Payday Sales Promo)", "quantity": 1, "price": 0 } for the free box
+  - Add a line item: { "itemName": "Payday Sales Top-up", "quantity": 1, "price": 1 } for the RM1 charge
+  - These are IN ADDITION to the regular paid items in the order — do not replace or merge them
+
 Return this exact structure:
 {
   "customerName": "",
@@ -154,7 +160,7 @@ Rules:
 - collectionMethod: default "Courier Required". Use "Self Pick Up" if pickup mentioned. Use "Self Deliver" if Lalamove/Grab/self deliver mentioned
 - collectionDate: expected delivery date as YYYY-MM-DD. Current year is 2026. Always use the explicit DATE NUMBER provided, never infer from day name alone. "Monday 15 June" = 2026-06-15. Leave "" if not mentioned
 - paymentMethod: default "Online". Change only if explicitly stated otherwise
-- items: one entry per product, skip if quantity 0
+- items: one entry per product, skip if quantity 0. Include Payday Sales promo items per the rule above if applicable
 - price = unit price as number only
 - deliveryFees and totalAmount = numbers only
 - Extract postcode from address if present
@@ -482,6 +488,10 @@ async function handleShopifyOrder(shopifyOrder) {
     // Map Shopify line items to our Product table by matching product title
     const lineItems = shopifyOrder.line_items || [];
 
+    // Detect Fraaash June Payday Sales promo via discount code
+    const discountCodes = (shopifyOrder.discount_codes || []).map(d => (d.code || '').toLowerCase());
+    const isPaydayPromo = discountCodes.includes('fraaashpayday');
+
     // Create Purchase Order
     const poFields = {
       'Order Number':      orderNumber,
@@ -500,6 +510,35 @@ async function handleShopifyOrder(shopifyOrder) {
     // Create Order Line Items — match Shopify product title to Airtable Product
     const matchedItems = [];
     for (const item of lineItems) {
+      // Detect the specific Bawk Bawk Chicken line item that has the -RM20 promo discount applied
+      const lineDiscount = (item.discount_allocations || [])
+        .reduce((sum, d) => sum + parseFloat(d.amount || 0), 0);
+      const isPromoLine = isPaydayPromo && lineDiscount > 0 &&
+                           item.title.toLowerCase().includes('bawk bawk');
+
+      if (isPromoLine && item.quantity > 0) {
+        // Split this line: paid units use the normal product, 1 unit is the free promo box
+        const paidQty = item.quantity - 1;
+        if (paidQty > 0) {
+          const productRec = await findProductByName(item.title) || await findProductByNameFuzzy(item.title);
+          if (productRec) {
+            await base(T_LINEITEMS).create([{
+              fields: { 'Purchase Orders': [poRecId], 'Item Name': [productRec.id], 'Quantity': paidQty }
+            }]);
+            matchedItems.push(`${item.title} x${paidQty}`);
+          }
+        }
+        // The 1 free promo box
+        const promoRec = await findProductByName('Bawk Bawk Chicken (Payday Sales Promo)');
+        if (promoRec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [promoRec.id], 'Quantity': 1 }
+          }]);
+          matchedItems.push('Bawk Bawk Chicken (Payday Sales Promo) x1');
+        }
+        continue;
+      }
+
       const productRec = await findProductByName(item.title) ||
                           await findProductByNameFuzzy(item.title);
       if (!productRec) {
@@ -514,6 +553,17 @@ async function handleShopifyOrder(shopifyOrder) {
         }
       }]);
       matchedItems.push(`${item.title} x${item.quantity}`);
+    }
+
+    // Add Payday Sales Top-up line item (the net RM1 the customer paid via the promo)
+    if (isPaydayPromo) {
+      const topupRec = await findProductByName('Payday Sales Top-up');
+      if (topupRec) {
+        await base(T_LINEITEMS).create([{
+          fields: { 'Purchase Orders': [poRecId], 'Item Name': [topupRec.id], 'Quantity': 1 }
+        }]);
+        matchedItems.push('Payday Sales Top-up x1');
+      }
     }
 
     // Add shipping fee as line item if present
