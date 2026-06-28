@@ -42,6 +42,11 @@ async function callClaude(params, retries = 2) {
   }
 }
 
+// ── Strip markdown code fences from Claude responses before JSON.parse ───────
+function stripFences(text) {
+  return text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
+}
+
 // ── Table names ───────────────────────────────────────────────────────────────
 const T_ORDERS    = 'Purchase Orders';
 const T_CUSTOMERS = 'Customers';
@@ -172,7 +177,8 @@ ${text}`
       }]
     });
 
-    const order = JSON.parse(res.content[0].text.trim());
+    // Strip markdown code fences before parsing (Claude sometimes wraps JSON in ```json ... ```)
+    const order = JSON.parse(stripFences(res.content[0].text));
 
     // 2. Prepare cat names
     const catNamesArr = order.catNames || [];
@@ -377,12 +383,11 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       }]
     });
 
-    let raw = res.content[0].text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
     let data;
     try {
-      data = JSON.parse(raw);
+      data = JSON.parse(stripFences(res.content[0].text));
     } catch (e) {
-      await bot.sendMessage(GROUP_CHAT_ID, raw, { parse_mode: 'HTML' });
+      await bot.sendMessage(GROUP_CHAT_ID, stripFences(res.content[0].text), { parse_mode: 'HTML' });
       return;
     }
 
@@ -742,10 +747,9 @@ async function handleUpdate(text) {
       }]
     });
 
-    let raw = res.content[0].text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
     let updateData;
     try {
-      updateData = JSON.parse(raw);
+      updateData = JSON.parse(stripFences(res.content[0].text));
     } catch (e) {
       await bot.sendMessage(GROUP_CHAT_ID, 'Could not understand the update. Example: Update order 00369 collection date to 20 June');
       return;
