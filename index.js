@@ -571,20 +571,27 @@ async function handleShopifyOrder(shopifyOrder) {
       }
     }
 
-    // Add shipping fee as line item if present
-    const shippingTotal = parseFloat(shopifyOrder.total_shipping_price_set?.shop_money?.amount || 0);
-    if (shippingTotal > 0) {
-      const deliveryRec = await findProductByName('Delivery Fees');
-      if (deliveryRec) {
-        await base(T_LINEITEMS).create([{
-          fields: {
-            'Purchase Orders': [poRecId],
-            'Item Name':       [deliveryRec.id],
-            'Quantity':        Math.round(shippingTotal)
-          }
-        }]);
+    // Calculate total boxes ordered (chicken + salmon combined) directly from line items
+    // 4 or more boxes = free shipping promotion, so skip the Delivery Fees line item entirely
+    const totalBoxesOrdered = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+    const qualifiesForFreeShipping = totalBoxesOrdered >= 4;
+
+    if (!qualifiesForFreeShipping) {
+      const shippingTotal = parseFloat(shopifyOrder.total_shipping_price_set?.shop_money?.amount || 0);
+      if (shippingTotal > 0) {
+        const deliveryRec = await findProductByName('Delivery Fees');
+        if (deliveryRec) {
+          await base(T_LINEITEMS).create([{
+            fields: {
+              'Purchase Orders': [poRecId],
+              'Item Name':       [deliveryRec.id],
+              'Quantity':        Math.round(shippingTotal)
+            }
+          }]);
+        }
       }
     }
+    // else: 4+ boxes ordered, free shipping promo applies — no Delivery Fees line item created
 
     // Notify Telegram group
     const totalAmount = shopifyOrder.total_price || '0.00';
