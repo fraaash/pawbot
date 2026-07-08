@@ -912,18 +912,23 @@ async function findProductByName(name) {
 
 // ── Generate next WhatsApp order number ──────────────────────────────────────
 // WhatsApp orders use padded 5-digit numbers (e.g. 00472); Shopify orders use
-// their own raw numbers, so we only look at Channel = 'FB/Insta' records here
-// to avoid mixing the two numbering sequences.
+// their own raw, unpadded numbers (e.g. 1160). We filter to Channel = 'FB/Insta'
+// to keep the two sequences separate, and sort by Order Date (not Order Number)
+// since Order Number is a text field and a handful of legacy records have
+// inconsistent/incorrect values that would otherwise throw off a text sort.
+// We also only trust values that match the proper 5-digit padded format
+// (e.g. "00472") — any stray unpadded value (like a Shopify number that got
+// copy-pasted into the wrong record) is ignored rather than treated as the max.
 async function generateOrderNumber() {
   const records = await base(T_ORDERS).select({
     filterByFormula: `AND({Channel} = 'FB/Insta', {Order Number} != '')`,
-    sort:       [{ field: 'Order Number', direction: 'desc' }],
-    maxRecords: 5
+    sort:       [{ field: 'Order Date', direction: 'desc' }],
+    maxRecords: 30
   }).all();
 
   let maxNum = 0;
   for (const r of records) {
-    const match = String(r.get('Order Number') || '').match(/^(\d+)/);
+    const match = String(r.get('Order Number') || '').match(/^(\d{5})$/);
     if (match) maxNum = Math.max(maxNum, parseInt(match[1], 10));
   }
   return String(maxNum + 1).padStart(5, '0');
