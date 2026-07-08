@@ -48,10 +48,28 @@ function stripFences(text) {
 }
 
 // ── Table names ───────────────────────────────────────────────────────────────
-const T_ORDERS    = 'Purchase Orders';
-const T_CUSTOMERS = 'Customers';
-const T_LINEITEMS = 'Order Line Items';
-const T_PRODUCTS  = 'Product';
+const T_ORDERS        = 'Purchase Orders';
+const T_CUSTOMERS     = 'Customers';
+const T_LINEITEMS     = 'Order Line Items';
+const T_PRODUCTS      = 'Product';
+const T_SUBSCRIPTIONS = 'Subscriptions';
+
+// ── Subscription tier config ─────────────────────────────────────────────────
+// Matches the Product records: "Monthly Subscription Discount (5%)", etc.
+const SUBSCRIPTION_TIERS = {
+  'Monthly':  { discountProduct: 'Monthly Subscription Discount (5%)',   percent: 5,  months: 1, recurring: false },
+  '3-Month':  { discountProduct: '3-Month Subscription Discount (10%)', percent: 10, months: 3, recurring: true  },
+  '6-Month':  { discountProduct: '6-Month Subscription Discount (15%)', percent: 15, months: 6, recurring: true  }
+};
+
+// ── 7.7 Sale Promotion config ────────────────────────────────────────────────
+// RM7 off orders with a RM100+ product subtotal. Only applies when the order
+// mentions the promo (WhatsApp) or uses this discount code (Shopify).
+// Ongoing until told otherwise — no expiry date check.
+const PROMO_7_7_MIN_SUBTOTAL = 100;
+const PROMO_7_7_DISCOUNT     = 7;
+const PROMO_7_7_PRODUCT      = '7.7 Sale Discount';
+const PROMO_7_7_SHOPIFY_CODE = 'fraaash77sale'; // ⚠️ update this to match the actual code configured in Shopify
 
 // ── Set webhook ───────────────────────────────────────────────────────────────
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
@@ -141,6 +159,21 @@ FRAAASH JUNE PAYDAY SALES PROMO (temporary promotion):
   - Add a line item: { "itemName": "Payday Sales Top Up", "quantity": 1, "price": 1 } for the RM1 charge
   - These are IN ADDITION to the regular paid items in the order — do not replace or merge them
 
+SUBSCRIPTION PLANS (recurring order plans, separate from the Payday promo):
+- Detect if this order is for a subscription plan. Look for words like "subscription", "sub plan", "monthly plan", "recurring order", "Curlec", "auto-debit", an explicit "Monthly / 3-Month / 6-Month" plan mention, OR a discount line that names a percentage matching a tier — e.g. "5% subscription discount", "Promotion 5%", "5% off" — even without the word "subscription" nearby, AS LONG AS the order also has a bulk quantity consistent with that tier (15+ boxes for 5%, 60 packs for 10%/15%).
+- Tiers:
+  - "Monthly" = 15+ boxes ordered (any chicken/salmon mix), one-time order (not recurring), 5% discount, 1 free delivery
+  - "3-Month" = exactly 60 packs ordered per order, recurring via Curlec auto-debit, 10% discount, 1 free delivery
+  - "6-Month" = exactly 60 packs ordered per order, recurring via Curlec auto-debit, 15% discount, 1 free delivery
+  - When quantity is 60 and it's unclear whether it's 3-Month or 6-Month, use the explicit tier named in the text. Default to "3-Month" if genuinely ambiguous.
+- "subscriptionType": set to "Monthly", "3-Month", or "6-Month" if detected, else "" (not a subscription order)
+- "subscriptionMonth": the delivery/month number if referenced (e.g. "2nd delivery", "month 3" -> 2, 3). Default to 1 (first delivery / new subscription) if not mentioned
+
+7.7 SALE PROMOTION (ongoing, RM7 off orders RM100+):
+- If the message explicitly mentions "7.7", "7.7 Sale", "7.7 Promo", or similar, set "promo77": true
+- Do NOT calculate whether the order actually qualifies for the RM100 minimum yourself — just detect whether the promo was mentioned. The bot verifies the RM100 threshold in code.
+- Set "promo77": false if not mentioned
+
 Return this exact structure:
 {
   "customerName": "",
@@ -157,6 +190,9 @@ Return this exact structure:
   ],
   "deliveryFees": 0,
   "totalAmount": 0,
+  "subscriptionType": "",
+  "subscriptionMonth": 1,
+  "promo77": false,
   "notes": ""
 }
 
@@ -170,6 +206,8 @@ Rules:
 - deliveryFees and totalAmount = numbers only
 - Extract postcode from address if present
 - Detect state from address if not explicitly stated. Note: "Pulau Pinang" or "P. Pinang" should be normalized to "Penang", "WP Kuala Lumpur" to "Kuala Lumpur", "Malacca" to "Melaka"
+- subscriptionType / subscriptionMonth per the SUBSCRIPTION PLANS rule above. Leave subscriptionType "" for normal, non-subscription orders
+- promo77: per the 7.7 SALE PROMOTION rule above — true only if explicitly mentioned in the message
 - notes: any special instructions. Leave "" if none
 
 Order form:
@@ -180,16 +218,23 @@ ${text}`
     // Strip markdown code fences before parsing (Claude sometimes wraps JSON in ```json ... ```)
     const order = JSON.parse(stripFences(res.content[0].text));
 
-    // 2. Prepare cat names
+    // 2. Prepare cat names + subscription defaults
     const catNamesArr = order.catNames || [];
     order.catNamesStr = catNamesArr.join(', ');
     order.numPets     = catNamesArr.length;
+    order.subscriptionType  = SUBSCRIPTION_TIERS[order.subscriptionType] ? order.subscriptionType : '';
+    order.subscriptionMonth = Number(order.subscriptionMonth) || 1;
+    order.promo77           = order.promo77 === true;
 
     // 3. Find or create customer
     const customerRecId = await findOrCreateCustomer(order);
 
+    // 3b. Assign the next WhatsApp order number (e.g. 00473)
+    const orderNumber = await generateOrderNumber();
+
     // 4. Create Purchase Order
     const poFields = {
+      'Order Number':      orderNumber,
       'Customer':          [customerRecId],
       'Order Date':        today,
       'Process Status':    'Pending',
@@ -221,9 +266,20 @@ ${text}`
       }]);
     }
 
-    // 6. Add delivery fee line item only if > RM0
-    //    Quantity = the RM amount (e.g. RM20 = quantity 20)
-    if (order.deliveryFees > 0) {
+    // 6. Delivery fee — subscriptions always get 1 free delivery instead of a paid Delivery Fees line.
+    //    Quantity = the RM amount (e.g. RM20 = quantity 20) for the regular, non-subscription case.
+    if (order.subscriptionType) {
+      const freeDeliveryRec = await findProductByName('Subscription Free Delivery');
+      if (freeDeliveryRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [freeDeliveryRec.id],
+            'Quantity':        1
+          }
+        }]);
+      }
+    } else if (order.deliveryFees > 0) {
       const deliveryRec = await findProductByName('Delivery Fees');
       if (deliveryRec) {
         await base(T_LINEITEMS).create([{
@@ -236,6 +292,77 @@ ${text}`
       }
     }
 
+    // 6b. Subscription handling: discount line item, Curlec auto-debit flag, Subscriptions record
+    let subscriptionRecId = null;
+    if (order.subscriptionType) {
+      const tier = SUBSCRIPTION_TIERS[order.subscriptionType];
+
+      // Discount applies to the paid product subtotal only (chicken/salmon boxes), not fees/promos
+      const productSubtotal = order.items
+        .filter(i => /bawk bawk|gulu gulu/i.test(i.itemName))
+        .reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+      const discountAmount = Math.round(productSubtotal * tier.percent / 100);
+
+      if (discountAmount > 0) {
+        const discountRec = await findProductByName(tier.discountProduct);
+        if (discountRec) {
+          await base(T_LINEITEMS).create([{
+            fields: {
+              'Purchase Orders': [poRecId],
+              'Item Name':       [discountRec.id],
+              'Quantity':        discountAmount
+            }
+          }]);
+        }
+      }
+
+      // Recurring plans (3-Month, 6-Month) bill via Curlec auto-debit — log it as a line item flag
+      if (tier.recurring) {
+        const curlecRec = await findProductByName('Curlec Auto-Debit');
+        if (curlecRec) {
+          await base(T_LINEITEMS).create([{
+            fields: {
+              'Purchase Orders': [poRecId],
+              'Item Name':       [curlecRec.id],
+              'Quantity':        1
+            }
+          }]);
+        }
+      }
+
+      // Find or create the Subscriptions record for this customer + tier, and link this PO to it
+      subscriptionRecId = await findOrCreateSubscription(order, customerRecId, poRecId, tier, today);
+      await base(T_ORDERS).update(poRecId, {
+        'Subscription':       [subscriptionRecId],
+        'Subscription Month': order.subscriptionMonth
+      });
+    }
+
+    // 6c. 7.7 Sale Promotion — RM7 off, only if mentioned AND product subtotal >= RM100.
+    //     The RM100 threshold is verified here, not trusted from Claude's extraction.
+    let promo77Applied = false;
+    if (order.promo77) {
+      const productSubtotal77 = order.items
+        .filter(i => /bawk bawk|gulu gulu/i.test(i.itemName))
+        .reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+
+      if (productSubtotal77 >= PROMO_7_7_MIN_SUBTOTAL) {
+        const promo77Rec = await findProductByName(PROMO_7_7_PRODUCT);
+        if (promo77Rec) {
+          await base(T_LINEITEMS).create([{
+            fields: {
+              'Purchase Orders': [poRecId],
+              'Item Name':       [promo77Rec.id],
+              'Quantity':        PROMO_7_7_DISCOUNT
+            }
+          }]);
+          promo77Applied = true;
+        }
+      } else {
+        console.warn(`7.7 promo mentioned but subtotal RM${productSubtotal77} is below RM${PROMO_7_7_MIN_SUBTOTAL} — not applied.`);
+      }
+    }
+
     // 7. Notify group
     const itemsList = order.items
       .map(i => `• ${i.itemName} x${i.quantity} — RM${(i.price * i.quantity).toFixed(2)}`)
@@ -243,6 +370,7 @@ ${text}`
 
     const msg = [
       '✅ <b>Order logged!</b>',
+      `🆔 <b>Order #:</b> ${orderNumber}`,
       '',
       `👤 <b>Customer:</b> ${order.customerName}`,
       `📞 <b>Contact:</b> ${order.contactNumber}`,
@@ -251,13 +379,17 @@ ${text}`
       `🚚 <b>Collection:</b> ${poFields['Collection Method']}`,
       `📅 <b>Collection Date:</b> ${order.collectionDate || 'Not specified'}`,
       `💳 <b>Payment:</b> ${poFields['Payment Method']}`,
+      order.subscriptionType
+        ? `🔁 <b>Subscription:</b> ${order.subscriptionType} — Month ${order.subscriptionMonth}`
+        : null,
+      promo77Applied ? `🏷️ <b>7.7 Sale:</b> -RM${PROMO_7_7_DISCOUNT} applied` : null,
       '',
       `🛍️ <b>Items:</b>\n${itemsList}`,
-      `📦 <b>Delivery Fee:</b> ${order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees}`,
+      `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
       `💰 <b>Total:</b> RM${order.totalAmount}`,
       '',
       '<i>Saved to Airtable ✓</i>'
-    ].join('\n');
+    ].filter(line => line !== null).join('\n');
 
     await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
 
@@ -338,7 +470,7 @@ You MUST respond with ONLY a valid JSON object. No text before or after. No expl
 
 RULES:
 - Questions about deliver/send/fulfill/ship/hantar on a date → filter by collectionDate
-- Questions about received/placed/today's orders on a date → filter by Order Date  
+- Questions about received/placed/today's orders on a date → filter by Order Date
 - Detect if the question asks for a SUMMARY only (e.g. "summary of orders", "summary of sales", "how many orders", "total sales today") vs a DETAILED list (e.g. "list orders", "show orders", "what are the orders to deliver", "give me details")
 - If it's a summary-only question, set "summaryOnly": true — but you MUST still include the full matching "orders" array (used internally to calculate accurate totals). The orders just won't be displayed to the user.
 - Do NOT calculate or guess the "summary" object yourself — just return the matching orders array accurately. The summary numbers will be calculated separately from your orders list.
@@ -497,6 +629,9 @@ async function handleShopifyOrder(shopifyOrder) {
     const discountCodes = (shopifyOrder.discount_codes || []).map(d => (d.code || '').toLowerCase());
     const isPaydayPromo = discountCodes.includes('fraaashpayday');
 
+    // Detect 7.7 Sale Promotion via discount code — RM7 off, only applied if product subtotal >= RM100
+    const isPromo77Code = discountCodes.includes(PROMO_7_7_SHOPIFY_CODE.toLowerCase());
+
     // Create Purchase Order
     const poFields = {
       'Order Number':      orderNumber,
@@ -568,6 +703,27 @@ async function handleShopifyOrder(shopifyOrder) {
           fields: { 'Purchase Orders': [poRecId], 'Item Name': [topupRec.id], 'Quantity': 1 }
         }]);
         matchedItems.push('Payday Sales Top Up x1');
+      }
+    }
+
+    // 7.7 Sale Promotion — RM7 off, only if the discount code was used AND product subtotal >= RM100.
+    // We verify the RM100 threshold ourselves rather than trusting the discount code alone.
+    let promo77Applied = false;
+    if (isPromo77Code) {
+      const productSubtotal77 = lineItems.reduce(
+        (sum, item) => sum + parseFloat(item.price || 0) * (item.quantity || 0), 0);
+
+      if (productSubtotal77 >= PROMO_7_7_MIN_SUBTOTAL) {
+        const promo77Rec = await findProductByName(PROMO_7_7_PRODUCT);
+        if (promo77Rec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [promo77Rec.id], 'Quantity': PROMO_7_7_DISCOUNT }
+          }]);
+          matchedItems.push(`${PROMO_7_7_PRODUCT} x${PROMO_7_7_DISCOUNT}`);
+          promo77Applied = true;
+        }
+      } else {
+        console.warn(`7.7 promo code used but subtotal RM${productSubtotal77} is below RM${PROMO_7_7_MIN_SUBTOTAL} — not applied.`);
       }
     }
 
@@ -708,6 +864,43 @@ async function findOrCreateCustomer(order) {
   return newCustomer[0].id;
 }
 
+// ── Find or create a Subscription record for a customer + tier ───────────────
+// Month 1 (new subscription): always creates a fresh Subscriptions record.
+// Month 2+ (renewal delivery): looks for the customer's existing Active subscription
+// of the same tier and links this new Purchase Order to it instead of creating a duplicate.
+async function findOrCreateSubscription(order, customerRecId, poRecId, tier, today) {
+  if (order.subscriptionMonth > 1) {
+    const activeSubs = await base(T_SUBSCRIPTIONS).select({
+      filterByFormula: `AND({Subscription Type} = '${order.subscriptionType}', {Status} = 'Active')`
+    }).all();
+    const match = activeSubs.find(s => (s.get('Customer') || []).includes(customerRecId));
+
+    if (match) {
+      const existingPOs = match.get('Purchase Orders') || [];
+      await base(T_SUBSCRIPTIONS).update(match.id, {
+        'Purchase Orders': [...existingPOs, poRecId]
+      });
+      return match.id;
+    }
+    // No existing active subscription found for a "month 2+" order — fall through and create one
+    console.warn(`No active ${order.subscriptionType} subscription found for renewal (month ${order.subscriptionMonth}); creating a new one.`);
+  }
+
+  const newSub = await base(T_SUBSCRIPTIONS).create([{
+    fields: {
+      'Subscription ID':   `${order.customerName} - ${order.subscriptionType} (${today})`,
+      'Customer':          [customerRecId],
+      'Subscription Type': order.subscriptionType,
+      'Status':            'Active',
+      'Start Date':        today,
+      'Total Months':      tier.months,
+      'Discount %':         tier.percent,
+      'Purchase Orders':   [poRecId]
+    }
+  }]);
+  return newSub[0].id;
+}
+
 // ── Find product by name ──────────────────────────────────────────────────────
 async function findProductByName(name) {
   const results = await base(T_PRODUCTS).select({
@@ -717,21 +910,23 @@ async function findProductByName(name) {
   return results.length > 0 ? results[0] : null;
 }
 
-// ── Generate next order number ────────────────────────────────────────────────
-async function generateOrderId() {
-  const allOrders = await base(T_ORDERS).select({
-    fields: ['Order Number'],
-    sort:   [{ field: 'Order Number', direction: 'desc' }],
-    maxRecords: 1
+// ── Generate next WhatsApp order number ──────────────────────────────────────
+// WhatsApp orders use padded 5-digit numbers (e.g. 00472); Shopify orders use
+// their own raw numbers, so we only look at Channel = 'FB/Insta' records here
+// to avoid mixing the two numbering sequences.
+async function generateOrderNumber() {
+  const records = await base(T_ORDERS).select({
+    filterByFormula: `AND({Channel} = 'FB/Insta', {Order Number} != '')`,
+    sort:       [{ field: 'Order Number', direction: 'desc' }],
+    maxRecords: 5
   }).all();
 
-  let nextNum = 1;
-  if (allOrders.length > 0) {
-    const lastNum = allOrders[0].get('Order Number') || '0';
-    const match   = String(lastNum).match(/^(\d+)/);
-    if (match) nextNum = parseInt(match[1]) + 1;
+  let maxNum = 0;
+  for (const r of records) {
+    const match = String(r.get('Order Number') || '').match(/^(\d+)/);
+    if (match) maxNum = Math.max(maxNum, parseInt(match[1], 10));
   }
-  return String(nextNum).padStart(5, '0');
+  return String(maxNum + 1).padStart(5, '0');
 }
 
 // ── Handle update request ────────────────────────────────────────────────────
