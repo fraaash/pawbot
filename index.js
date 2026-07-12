@@ -71,6 +71,17 @@ const PROMO_7_7_DISCOUNT     = 7;
 const PROMO_7_7_PRODUCT      = '7.7 Sale Discount';
 const PROMO_7_7_SHOPIFY_CODE = 'fraaash77sale'; // ⚠️ update this to match the actual code configured in Shopify
 
+// ── Bundle Set Promo config ──────────────────────────────────────────────────
+// 1 Bawk Bawk + 1 Gulu Gulu box, free shipping. On Shopify this is sold as its
+// own product (1 qty = 1 chicken + 1 salmon box); on WhatsApp staff type the
+// individual Bawk Bawk / Gulu Gulu lines and just mention "Bundle Set".
+// Either way we log the real Bawk Bawk + Gulu Gulu quantities (so Chicken/Salmon
+// Quantity rollups stay accurate) plus an RM0 "Bundle Set" tracking line so you
+// can count how many bundle-promo orders came in.
+const BUNDLE_PRODUCT         = 'Bundle Set (Limited Time Only)';
+const BUNDLE_CHICKEN_PRODUCT = 'Bawk Bawk Fresh Chicken Recipe';
+const BUNDLE_SALMON_PRODUCT  = 'Gulu Gulu Fresh Salmon and Chicken Recipe';
+
 // ── Set webhook ───────────────────────────────────────────────────────────────
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
 bot.setWebHook(WEBHOOK_URL)
@@ -174,6 +185,12 @@ SUBSCRIPTION PLANS (recurring order plans, separate from the Payday promo):
 - Do NOT calculate whether the order actually qualifies for the RM100 minimum yourself — just detect whether the promo was mentioned. The bot verifies the RM100 threshold in code.
 - Set "promo77": false if not mentioned
 
+BUNDLE SET PROMO (ongoing, free shipping on 1 Bawk Bawk + 1 Gulu Gulu bundle):
+- If the message mentions "Bundle Set", "Bundle Promo", "Bundle Set Promo", or similar, set "bundlePromo": true
+- Still list the individual Bawk Bawk and Gulu Gulu items in "items" exactly as quantities are stated in the message (do NOT add a separate "Bundle Set" item yourself — the bot handles that)
+- Do NOT calculate the shipping waiver yourself — the bot verifies the chicken/salmon quantities and applies free shipping in code
+- Set "bundlePromo": false if not mentioned
+
 Return this exact structure:
 {
   "customerName": "",
@@ -193,6 +210,7 @@ Return this exact structure:
   "subscriptionType": "",
   "subscriptionMonth": 1,
   "promo77": false,
+  "bundlePromo": false,
   "notes": ""
 }
 
@@ -208,6 +226,7 @@ Rules:
 - Detect state from address if not explicitly stated. Note: "Pulau Pinang" or "P. Pinang" should be normalized to "Penang", "WP Kuala Lumpur" to "Kuala Lumpur", "Malacca" to "Melaka"
 - subscriptionType / subscriptionMonth per the SUBSCRIPTION PLANS rule above. Leave subscriptionType "" for normal, non-subscription orders
 - promo77: per the 7.7 SALE PROMOTION rule above — true only if explicitly mentioned in the message
+- bundlePromo: per the BUNDLE SET PROMO rule above — true only if explicitly mentioned in the message
 - notes: any special instructions. Leave "" if none
 
 Order form:
@@ -225,6 +244,7 @@ ${text}`
     order.subscriptionType  = SUBSCRIPTION_TIERS[order.subscriptionType] ? order.subscriptionType : '';
     order.subscriptionMonth = Number(order.subscriptionMonth) || 1;
     order.promo77           = order.promo77 === true;
+    order.bundlePromo       = order.bundlePromo === true;
 
     // 3. Find or create customer
     const customerRecId = await findOrCreateCustomer(order);
@@ -266,8 +286,18 @@ ${text}`
       }]);
     }
 
-    // 6. Delivery fee — subscriptions always get 1 free delivery instead of a paid Delivery Fees line.
-    //    Quantity = the RM amount (e.g. RM20 = quantity 20) for the regular, non-subscription case.
+    // 6. Delivery fee — subscriptions get 1 free delivery, Bundle Set orders get free
+    //    shipping on the bundle, otherwise a paid Delivery Fees line as normal.
+    //    Quantity = the RM amount (e.g. RM20 = quantity 20) for the regular case.
+    const bundleChickenQty = order.items
+      .filter(i => /bawk bawk/i.test(i.itemName))
+      .reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    const bundleSalmonQty = order.items
+      .filter(i => /gulu gulu/i.test(i.itemName))
+      .reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    const bundleQty = (order.bundlePromo && bundleChickenQty > 0 && bundleSalmonQty > 0)
+      ? Math.min(bundleChickenQty, bundleSalmonQty) : 0;
+
     if (order.subscriptionType) {
       const freeDeliveryRec = await findProductByName('Subscription Free Delivery');
       if (freeDeliveryRec) {
@@ -279,6 +309,8 @@ ${text}`
           }
         }]);
       }
+    } else if (bundleQty > 0) {
+      // Free shipping — no Delivery Fees line item at all
     } else if (order.deliveryFees > 0) {
       const deliveryRec = await findProductByName('Delivery Fees');
       if (deliveryRec) {
@@ -287,6 +319,21 @@ ${text}`
             'Purchase Orders': [poRecId],
             'Item Name':       [deliveryRec.id],
             'Quantity':        order.deliveryFees
+          }
+        }]);
+      }
+    }
+
+    // 6d. Bundle Set Promo tracking line item (RM0) — the real Bawk Bawk / Gulu Gulu
+    // quantities are already logged in step 5 above from order.items as normal.
+    if (bundleQty > 0) {
+      const bundleRec = await findProductByName(BUNDLE_PRODUCT);
+      if (bundleRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [bundleRec.id],
+            'Quantity':        bundleQty
           }
         }]);
       }
@@ -383,9 +430,10 @@ ${text}`
         ? `🔁 <b>Subscription:</b> ${order.subscriptionType} — Month ${order.subscriptionMonth}`
         : null,
       promo77Applied ? `🏷️ <b>7.7 Sale:</b> -RM${PROMO_7_7_DISCOUNT} applied` : null,
+      bundleQty > 0 ? `📦 <b>Bundle Set Promo:</b> ${bundleQty} bundle(s) — free shipping` : null,
       '',
       `🛍️ <b>Items:</b>\n${itemsList}`,
-      `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
+      `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : bundleQty > 0 ? 'Free (Bundle Set)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
       `💰 <b>Total:</b> RM${order.totalAmount}`,
       '',
       '<i>Saved to Airtable ✓</i>'
@@ -650,6 +698,36 @@ async function handleShopifyOrder(shopifyOrder) {
     // Create Order Line Items — match Shopify product title to Airtable Product
     const matchedItems = [];
     for (const item of lineItems) {
+      // Bundle Set (Limited Time Only) — 1 qty = 1 Bawk Bawk + 1 Gulu Gulu box.
+      // Expand into the real chicken/salmon line items (so Chicken/Salmon Quantity
+      // rollups stay accurate) plus an RM0 tracking line for promo reporting.
+      if (item.title.toLowerCase().includes('bundle set') && item.quantity > 0) {
+        const bundleQty      = item.quantity;
+        const chickenRec     = await findProductByName(BUNDLE_CHICKEN_PRODUCT);
+        const salmonRec      = await findProductByName(BUNDLE_SALMON_PRODUCT);
+        const bundleTrackRec = await findProductByName(BUNDLE_PRODUCT);
+
+        if (chickenRec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [chickenRec.id], 'Quantity': bundleQty }
+          }]);
+          matchedItems.push(`${BUNDLE_CHICKEN_PRODUCT} x${bundleQty}`);
+        }
+        if (salmonRec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [salmonRec.id], 'Quantity': bundleQty }
+          }]);
+          matchedItems.push(`${BUNDLE_SALMON_PRODUCT} x${bundleQty}`);
+        }
+        if (bundleTrackRec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [bundleTrackRec.id], 'Quantity': bundleQty }
+          }]);
+          matchedItems.push(`${BUNDLE_PRODUCT} x${bundleQty} (promo tag)`);
+        }
+        continue;
+      }
+
       // Detect the specific Bawk Bawk Chicken line item that has the -RM20 promo discount applied
       const lineDiscount = (item.discount_allocations || [])
         .reduce((sum, d) => sum + parseFloat(d.amount || 0), 0);
@@ -727,9 +805,13 @@ async function handleShopifyOrder(shopifyOrder) {
       }
     }
 
-    // Calculate total boxes ordered (chicken + salmon combined) directly from line items
+    // Calculate total boxes ordered (chicken + salmon combined) directly from line items.
+    // A Bundle Set line counts as 2 boxes per qty (1 chicken + 1 salmon).
     // 4 or more boxes = free shipping promotion, so skip the Delivery Fees line item entirely
-    const totalBoxesOrdered = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+    const totalBoxesOrdered = lineItems.reduce((sum, item) => {
+      const isBundle = item.title.toLowerCase().includes('bundle set');
+      return sum + (item.quantity || 0) * (isBundle ? 2 : 1);
+    }, 0);
     const qualifiesForFreeShipping = totalBoxesOrdered >= 4;
 
     if (!qualifiesForFreeShipping) {
