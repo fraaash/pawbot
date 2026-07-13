@@ -82,14 +82,6 @@ const BUNDLE_PRODUCT         = 'Bundle Set (Limited Time Only)';
 const BUNDLE_CHICKEN_PRODUCT = 'Bawk Bawk Fresh Chicken Recipe';
 const BUNDLE_SALMON_PRODUCT  = 'Gulu Gulu Fresh Salmon and Chicken Recipe';
 
-// ── Set webhook ───────────────────────────────────────────────────────────────
-const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
-bot.setWebHook(WEBHOOK_URL)
-  .then(() => console.log('✅ Webhook set to', WEBHOOK_URL))
-  .catch(err => {
-    // Handle Telegram rate limiting gracefully — webhook is likely already set correctly
-    console.warn('⚠️ setWebHook failed (often harmless if already set):', err.message);
-  });
 
 // Catch any other unhandled promise rejections so the process doesn't crash
 process.on('unhandledRejection', (reason) => {
