@@ -81,7 +81,20 @@ const PROMO_7_7_SHOPIFY_CODE = 'fraaash77sale'; // ⚠️ update this to match t
 const BUNDLE_PRODUCT         = 'Bundle Set (Limited Time Only)';
 const BUNDLE_CHICKEN_PRODUCT = 'Bawk Bawk Fresh Chicken Recipe';
 const BUNDLE_SALMON_PRODUCT  = 'Gulu Gulu Fresh Salmon and Chicken Recipe';
+// Matches any Shopify product title containing "bundle" — e.g. "Bundle Set
+// (Limited Time Only)" or "Starter Bundle (First-Time Customers Only)".
+// Kept broad (not the full name) since this product tends to get renamed for
+// each new promo wave; update this if a future name doesn't contain "bundle".
+const BUNDLE_TITLE_MATCH = /bundle/i;
 
+// ── Set webhook ───────────────────────────────────────────────────────────────
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
+bot.setWebHook(WEBHOOK_URL)
+  .then(() => console.log('✅ Webhook set to', WEBHOOK_URL))
+  .catch(err => {
+    // Handle Telegram rate limiting gracefully — webhook is likely already set correctly
+    console.warn('⚠️ setWebHook failed (often harmless if already set):', err.message);
+  });
 
 // Catch any other unhandled promise rejections so the process doesn't crash
 process.on('unhandledRejection', (reason) => {
@@ -690,10 +703,10 @@ async function handleShopifyOrder(shopifyOrder) {
     // Create Order Line Items — match Shopify product title to Airtable Product
     const matchedItems = [];
     for (const item of lineItems) {
-      // Bundle Set (Limited Time Only) — 1 qty = 1 Bawk Bawk + 1 Gulu Gulu box.
-      // Expand into the real chicken/salmon line items (so Chicken/Salmon Quantity
-      // rollups stay accurate) plus an RM0 tracking line for promo reporting.
-      if (item.title.toLowerCase().includes('bundle set') && item.quantity > 0) {
+      // Bundle promo (any product with "bundle" in the title) — 1 qty = 1 Bawk Bawk
+      // + 1 Gulu Gulu box. Expand into the real chicken/salmon line items (so
+      // Chicken/Salmon Quantity rollups stay accurate) plus an RM0 tracking line.
+      if (BUNDLE_TITLE_MATCH.test(item.title) && item.quantity > 0) {
         const bundleQty      = item.quantity;
         const chickenRec     = await findProductByName(BUNDLE_CHICKEN_PRODUCT);
         const salmonRec      = await findProductByName(BUNDLE_SALMON_PRODUCT);
@@ -801,7 +814,7 @@ async function handleShopifyOrder(shopifyOrder) {
     // A Bundle Set line counts as 2 boxes per qty (1 chicken + 1 salmon).
     // 4 or more boxes = free shipping promotion, so skip the Delivery Fees line item entirely
     const totalBoxesOrdered = lineItems.reduce((sum, item) => {
-      const isBundle = item.title.toLowerCase().includes('bundle set');
+      const isBundle = BUNDLE_TITLE_MATCH.test(item.title);
       return sum + (item.quantity || 0) * (isBundle ? 2 : 1);
     }, 0);
     const qualifiesForFreeShipping = totalBoxesOrdered >= 4;
