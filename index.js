@@ -87,6 +87,21 @@ const BUNDLE_SALMON_PRODUCT  = 'Gulu Gulu Fresh Salmon and Chicken Recipe';
 // each new promo wave; update this if a future name doesn't contain "bundle".
 const BUNDLE_TITLE_MATCH = /bundle/i;
 
+// ── Merdeka Promo config ──────────────────────────────────────────────────────
+// RM6.9 off orders with a RM100+ product subtotal, for a 3-day Merdeka sale.
+// On Shopify the discount code auto-applies and stacks with Shopify's own
+// free-shipping-over-RM100 rule — that shipping waiver is native to Shopify,
+// so we don't need to code it; we just read whatever total_shipping_price_set
+// actually charged (already RM0 when Shopify's rule kicked in). On WhatsApp,
+// only applies if staff mention the promo.
+const PROMO_MERDEKA_MIN_SUBTOTAL = 100;
+const PROMO_MERDEKA_DISCOUNT     = 6.9;
+const PROMO_MERDEKA_PRODUCT      = 'Merdeka Promo Discount';
+// Shopify's discount is named "Merdeka 6.9 Sales" — it's an auto-applying discount,
+// not a customer-entered code, so it may show up under discount_applications (title)
+// rather than discount_codes (code). We check both to be safe.
+const PROMO_MERDEKA_SHOPIFY_NAME = 'Merdeka 6.9 Sales';
+
 // ── Set webhook ───────────────────────────────────────────────────────────────
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
 bot.setWebHook(WEBHOOK_URL)
@@ -196,6 +211,11 @@ BUNDLE SET PROMO (ongoing, free shipping on 1 Bawk Bawk + 1 Gulu Gulu bundle):
 - Do NOT calculate the shipping waiver yourself — the bot verifies the chicken/salmon quantities and applies free shipping in code
 - Set "bundlePromo": false if not mentioned
 
+MERDEKA PROMOTION (3-day sale, RM6.9 off orders RM100+):
+- If the message mentions "Merdeka Sales", "Merdeka sale", "Merdeka Promo", or similar (e.g. a line like "Merdeka sales -RM6.90"), set "promoMerdeka": true
+- Do NOT calculate whether the order actually qualifies for the RM100 minimum yourself — just detect whether the promo was mentioned. The bot verifies the RM100 threshold in code.
+- Set "promoMerdeka": false if not mentioned
+
 Return this exact structure:
 {
   "customerName": "",
@@ -216,6 +236,7 @@ Return this exact structure:
   "subscriptionMonth": 1,
   "promo77": false,
   "bundlePromo": false,
+  "promoMerdeka": false,
   "notes": ""
 }
 
@@ -232,6 +253,7 @@ Rules:
 - subscriptionType / subscriptionMonth per the SUBSCRIPTION PLANS rule above. Leave subscriptionType "" for normal, non-subscription orders
 - promo77: per the 7.7 SALE PROMOTION rule above — true only if explicitly mentioned in the message
 - bundlePromo: per the BUNDLE SET PROMO rule above — true only if explicitly mentioned in the message
+- promoMerdeka: per the MERDEKA PROMOTION rule above — true only if explicitly mentioned in the message
 - notes: any special instructions. Leave "" if none
 
 Order form:
@@ -250,6 +272,7 @@ ${text}`
     order.subscriptionMonth = Number(order.subscriptionMonth) || 1;
     order.promo77           = order.promo77 === true;
     order.bundlePromo       = order.bundlePromo === true;
+    order.promoMerdeka      = order.promoMerdeka === true;
 
     // 3. Find or create customer
     const customerRecId = await findOrCreateCustomer(order);
@@ -415,6 +438,33 @@ ${text}`
       }
     }
 
+    // 6e. Merdeka Promo — RM6.9 off, only if mentioned AND product subtotal >= RM100.
+    //     The RM100 threshold is verified here, not trusted from Claude's extraction.
+    //     Stacks freely with the subscription/bundle free-delivery logic above — this
+    //     only ever adds a discount line item, it never touches delivery fees itself.
+    let promoMerdekaApplied = false;
+    if (order.promoMerdeka) {
+      const productSubtotalMerdeka = order.items
+        .filter(i => /bawk bawk|gulu gulu/i.test(i.itemName))
+        .reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+
+      if (productSubtotalMerdeka >= PROMO_MERDEKA_MIN_SUBTOTAL) {
+        const promoMerdekaRec = await findProductByName(PROMO_MERDEKA_PRODUCT);
+        if (promoMerdekaRec) {
+          await base(T_LINEITEMS).create([{
+            fields: {
+              'Purchase Orders': [poRecId],
+              'Item Name':       [promoMerdekaRec.id],
+              'Quantity':        PROMO_MERDEKA_DISCOUNT
+            }
+          }]);
+          promoMerdekaApplied = true;
+        }
+      } else {
+        console.warn(`Merdeka promo mentioned but subtotal RM${productSubtotalMerdeka} is below RM${PROMO_MERDEKA_MIN_SUBTOTAL} — not applied.`);
+      }
+    }
+
     // 7. Notify group
     const itemsList = order.items
       .map(i => `• ${i.itemName} x${i.quantity} — RM${(i.price * i.quantity).toFixed(2)}`)
@@ -436,6 +486,7 @@ ${text}`
         : null,
       promo77Applied ? `🏷️ <b>7.7 Sale:</b> -RM${PROMO_7_7_DISCOUNT} applied` : null,
       bundleQty > 0 ? `📦 <b>Bundle Set Promo:</b> ${bundleQty} bundle(s) — free shipping` : null,
+      promoMerdekaApplied ? `🇲🇾 <b>Merdeka Promo:</b> -RM${PROMO_MERDEKA_DISCOUNT} applied` : null,
       '',
       `🛍️ <b>Items:</b>\n${itemsList}`,
       `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : bundleQty > 0 ? 'Free (Bundle Set)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
@@ -685,6 +736,18 @@ async function handleShopifyOrder(shopifyOrder) {
     // Detect 7.7 Sale Promotion via discount code — RM7 off, only applied if product subtotal >= RM100
     const isPromo77Code = discountCodes.includes(PROMO_7_7_SHOPIFY_CODE.toLowerCase());
 
+    // Detect Merdeka Promo — RM6.9 off, only applied if product subtotal >= RM100.
+    // "Merdeka 6.9 Sales" is an auto-applying Shopify discount (not a code the customer
+    // types in), so it normally shows up under discount_applications by title rather than
+    // discount_codes. We check both so it still works if Shopify ever reports it as a code.
+    // This stacks with Shopify's own free-shipping-over-RM100 rule, which is native to
+    // Shopify — we don't need to detect it separately, total_shipping_price_set below
+    // already reflects whatever Shopify actually charged (RM0 when that rule kicked in).
+    const discountApplications = shopifyOrder.discount_applications || [];
+    const isMerdekaCode =
+      discountCodes.includes(PROMO_MERDEKA_SHOPIFY_NAME.toLowerCase()) ||
+      discountApplications.some(d => (d.title || '').toLowerCase() === PROMO_MERDEKA_SHOPIFY_NAME.toLowerCase());
+
     // Create Purchase Order
     const poFields = {
       'Order Number':      orderNumber,
@@ -807,6 +870,27 @@ async function handleShopifyOrder(shopifyOrder) {
         }
       } else {
         console.warn(`7.7 promo code used but subtotal RM${productSubtotal77} is below RM${PROMO_7_7_MIN_SUBTOTAL} — not applied.`);
+      }
+    }
+
+    // Merdeka Promo — RM6.9 off, only if the discount code was used AND product subtotal >= RM100.
+    // We verify the RM100 threshold ourselves rather than trusting the discount code alone.
+    let promoMerdekaApplied = false;
+    if (isMerdekaCode) {
+      const productSubtotalMerdeka = lineItems.reduce(
+        (sum, item) => sum + parseFloat(item.price || 0) * (item.quantity || 0), 0);
+
+      if (productSubtotalMerdeka >= PROMO_MERDEKA_MIN_SUBTOTAL) {
+        const promoMerdekaRec = await findProductByName(PROMO_MERDEKA_PRODUCT);
+        if (promoMerdekaRec) {
+          await base(T_LINEITEMS).create([{
+            fields: { 'Purchase Orders': [poRecId], 'Item Name': [promoMerdekaRec.id], 'Quantity': PROMO_MERDEKA_DISCOUNT }
+          }]);
+          matchedItems.push(`${PROMO_MERDEKA_PRODUCT} x${PROMO_MERDEKA_DISCOUNT}`);
+          promoMerdekaApplied = true;
+        }
+      } else {
+        console.warn(`Merdeka promo code used but subtotal RM${productSubtotalMerdeka} is below RM${PROMO_MERDEKA_MIN_SUBTOTAL} — not applied.`);
       }
     }
 
