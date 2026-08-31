@@ -96,7 +96,7 @@ const BUNDLE_TITLE_MATCH = /bundle/i;
 // only applies if staff mention the promo.
 const PROMO_MERDEKA_MIN_SUBTOTAL = 100;
 const PROMO_MERDEKA_DISCOUNT     = 6.9;
-const PROMO_MERDEKA_PRODUCT      = 'Merdeka Promo Discount';
+const PROMO_MERDEKA_PRODUCT      = 'Merdeka Sales'; // must match the exact Product record Name in Airtable
 // Shopify's discount is named "Merdeka 6.9 Sales" — it's an auto-applying discount,
 // not a customer-entered code, so it may show up under discount_applications (title)
 // rather than discount_codes (code). We check both to be safe.
