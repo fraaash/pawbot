@@ -42,6 +42,35 @@ async function callClaude(params, retries = 2) {
   }
 }
 
+// ── Telegram send with retry ─────────────────────────────────────────────────
+// Render's outbound connections to api.telegram.org occasionally get dropped
+// mid-TLS. node-telegram-bot-api surfaces that as EFATAL / AggregateError /
+// ECONNRESET from its HTTP layer. It is transient and unrelated to the order
+// itself — Airtable has already been written by the time we notify — so retry
+// with a short backoff instead of letting one blip look like a failed order.
+async function sendTelegram(text, options = {}, retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await bot.sendMessage(GROUP_CHAT_ID, text, options);
+    } catch (err) {
+      const detail = String(err?.message || err);
+      const status = err?.response?.statusCode;
+      const isTransient =
+        ['EFATAL', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(err?.code) ||
+        /AggregateError|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|network/i.test(detail) ||
+        [429, 500, 502, 503, 504].includes(status);
+
+      if (isTransient && attempt < retries) {
+        const waitMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
+        console.warn(`Telegram send failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${waitMs}ms:`, detail);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ── Strip markdown code fences from Claude responses before JSON.parse ───────
 function stripFences(text) {
   return text.trim().replace(/^```json\n?|^```\n?|\n?```$/g, '').trim();
@@ -330,7 +359,7 @@ ${text}`
     //    so an order without one cannot be logged. Stop here with a clear message
     //    rather than creating a nameless/unmatched profile.
     if (!normalisePhone(order.contactNumber)) {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         '⚠️ <b>Order NOT logged — missing contact number</b>\n\n' +
         `👤 <b>Customer:</b> ${order.customerName || 'Unknown'}\n\n` +
         'Customers are identified by phone number, so a valid contact number is required. ' +
@@ -604,7 +633,17 @@ ${text}`
       '<i>Saved to Airtable ✓</i>'
     ].filter(line => line !== null).join('\n');
 
-    await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
+    // Order is already saved — a notification failure must not be reported as a
+    // failed order (see the same guard in handleShopifyOrder).
+    try {
+      await sendTelegram(msg, { parse_mode: 'HTML' });
+    } catch (notifyErr) {
+      console.error(`Order ${orderNumber} saved, but notification failed:`, notifyErr);
+      await sendTelegram(
+        `⚠️ Order <b>${orderNumber}</b> WAS saved to Airtable — only its Telegram notification failed.\nNo action needed on the order itself.\nError: ${notifyErr.message}`,
+        { parse_mode: 'HTML' }
+      ).catch(e => console.error('Fallback notification also failed:', e));
+    }
 
   } catch (err) {
     console.error('Order error:', err);
@@ -615,14 +654,14 @@ ${text}`
       err.status === 529 || err.status === 500 || err.status === 502 || err.status === 503;
 
     if (isClaudeOutage) {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         '🔧 <b>Claude AI is temporarily down</b> (Anthropic service issue, not a bot bug).\n\n' +
         '⚠️ This order was NOT saved automatically. Please key it into Airtable manually for now:\n' +
          'https://airtable.com/' + (process.env.AIRTABLE_BASE_ID || '') + '\n\n' +
         'PawBot will resume auto-processing once Claude is back online. Check status.claude.com for updates.',
         { parse_mode: 'HTML' });
     } else {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         '⚠️ Could not process this order. Please check the format and try again.\n\nError: ' + err.message);
     }
   }
@@ -732,12 +771,12 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
     try {
       data = JSON.parse(stripFences(res.content[0].text));
     } catch (e) {
-      await bot.sendMessage(GROUP_CHAT_ID, stripFences(res.content[0].text), { parse_mode: 'HTML' });
+      await sendTelegram(stripFences(res.content[0].text), { parse_mode: 'HTML' });
       return;
     }
 
     if (data.noResults || !data.orders || data.orders.length === 0) {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         data.noResultsMessage || '🔍 No orders found for that criteria.',
         { parse_mode: 'HTML' });
       return;
@@ -757,7 +796,7 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
         ];
         if (o.collectionDate) lines.push(`📅 Collection Date: ${o.collectionDate}`);
         if (o.notes)          lines.push(`🗒️ ${o.notes}`);
-        await bot.sendMessage(GROUP_CHAT_ID, lines.join('\n'), { parse_mode: 'HTML' });
+        await sendTelegram(lines.join('\n'), { parse_mode: 'HTML' });
       }
     }
 
@@ -786,11 +825,11 @@ Recent orders (last 100): ${JSON.stringify(enrichedRecent)}`
       `🏪 Self Pick Up: ${s.selfPickUpCount}`,
       '───────────────'
     ].join('\n');
-    await bot.sendMessage(GROUP_CHAT_ID, summary, { parse_mode: 'HTML' });
+    await sendTelegram(summary, { parse_mode: 'HTML' });
 
   } catch (err) {
     console.error('Question error:', err);
-    await bot.sendMessage(GROUP_CHAT_ID,
+    await sendTelegram(
       '⚠️ Could not fetch data right now. Try again shortly.');
   }
 }
@@ -834,7 +873,7 @@ async function handleShopifyOrder(shopifyOrder) {
     // This is a real paid order though, so alert with the full details for manual entry
     // instead of silently dropping it.
     if (!normalisePhone(order.contactNumber)) {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         '⚠️ <b>Shopify order NOT logged — no phone number on the order</b>\n\n' +
         `🆔 <b>Order:</b> ${shopifyOrderName}\n` +
         `👤 <b>Customer:</b> ${order.customerName}\n` +
@@ -1039,7 +1078,9 @@ async function handleShopifyOrder(shopifyOrder) {
         await base(T_LINEITEMS).create([{
           fields: { 'Purchase Orders': [poRecId], 'Item Name': [tierRec.id], 'Quantity': applied1111Tier.discount }
         }]);
-        matchedItems.push(`${applied1111Tier.product} (-RM${applied1111Tier.discount})`);
+        // Deliberately NOT pushed into matchedItems — the discount gets its own
+        // "11.11 Sale" line in the Telegram message, and listing it in both places
+        // read as a duplicate ("• 11.11 SALE (-RM25) (-RM25)").
         promo1111Applied = applied1111Tier;
       } else {
         console.warn(`11.11 product "${applied1111Tier.product}" not found in Airtable — discount NOT logged.`);
@@ -1104,12 +1145,24 @@ async function handleShopifyOrder(shopifyOrder) {
       '<i>Saved to Airtable ✓</i>'
     ].filter(line => line !== null).join('\n');
 
-    await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
+    // The order is fully written to Airtable by this point. If only the
+    // notification fails, report THAT — don't claim the order failed, which is
+    // what previously made a transient Telegram blip look like a lost order.
+    try {
+      await sendTelegram(msg, { parse_mode: 'HTML' });
+    } catch (notifyErr) {
+      console.error(`Shopify order ${orderNumber} saved, but notification failed:`, notifyErr);
+      await sendTelegram(
+        `⚠️ Shopify order <b>${orderNumber}</b> WAS saved to Airtable — only its Telegram notification failed.\nNo action needed on the order itself.\nError: ${notifyErr.message}`,
+        { parse_mode: 'HTML' }
+      ).catch(e => console.error('Fallback notification also failed:', e));
+    }
 
   } catch (err) {
     console.error('Shopify order processing error:', err);
-    await bot.sendMessage(GROUP_CHAT_ID,
-      '⚠️ Error processing a Shopify order. Check Render logs.\nError: ' + err.message);
+    await sendTelegram(
+      '⚠️ Error processing a Shopify order. Check Render logs.\nError: ' + err.message)
+      .catch(e => console.error('Error notification also failed:', e));
   }
 }
 
@@ -1336,7 +1389,7 @@ async function handleUpdate(text) {
     try {
       updateData = JSON.parse(stripFences(res.content[0].text));
     } catch (e) {
-      await bot.sendMessage(GROUP_CHAT_ID, 'Could not understand the update. Example: Update order 00369 collection date to 20 June');
+      await sendTelegram('Could not understand the update. Example: Update order 00369 collection date to 20 June');
       return;
     }
 
@@ -1347,7 +1400,7 @@ async function handleUpdate(text) {
     const records = await base(table).select({ filterByFormula: formula, maxRecords: 1 }).all();
 
     if (records.length === 0) {
-      await bot.sendMessage(GROUP_CHAT_ID,
+      await sendTelegram(
         '<b>Not found:</b> ' + updateData.searchField + ': ' + updateData.searchValue,
         { parse_mode: 'HTML' });
       return;
@@ -1359,7 +1412,7 @@ async function handleUpdate(text) {
       .map(([field, value]) => '• <b>' + field + '</b> → ' + value)
       .join('\n');
 
-    await bot.sendMessage(GROUP_CHAT_ID,
+    await sendTelegram(
       '✅ <b>Updated!</b>\n\n'
       + updateData.searchField + ': <b>' + updateData.searchValue + '</b>\n\n'
       + changesList + '\n\n<i>Airtable updated ✓</i>',
@@ -1367,7 +1420,7 @@ async function handleUpdate(text) {
 
   } catch (err) {
     console.error('Update error:', err);
-    await bot.sendMessage(GROUP_CHAT_ID, '⚠️ Update failed: ' + err.message);
+    await sendTelegram('⚠️ Update failed: ' + err.message);
   }
 }
 
