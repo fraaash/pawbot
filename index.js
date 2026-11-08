@@ -102,6 +102,46 @@ const PROMO_MERDEKA_PRODUCT      = 'Merdeka Sales'; // must match the exact Prod
 // rather than discount_codes (code). We check both to be safe.
 const PROMO_MERDEKA_SHOPIFY_NAME = 'Merdeka 6.9 Sales';
 
+// ── 11.11 Meowga Sale config ─────────────────────────────────────────────────
+// Tiered discount on the PRODUCT subtotal (Bawk Bawk / Gulu Gulu boxes only —
+// fees and other promo lines never count towards the threshold):
+//   >= RM100 -> RM11 off   |   >= RM150 -> RM25 off   |   >= RM200 -> RM35 off
+// Every tier also gets free shipping. In practice that is already covered: the
+// priciest box is RM29, so 3 boxes caps at RM87 and any RM100+ order is always
+// 4+ boxes, which triggers the standing "4+ boxes ship free" rule on both
+// channels. We still force it below so the rule can't drift apart later.
+// Tiers are listed HIGHEST FIRST — the first match wins, so a RM250 order gets
+// RM35 off, not RM11.
+const PROMO_1111_TIERS = [
+  { minSubtotal: 200, discount: 35, product: '11.11 SALE (-RM35)', shopifyName: 'Fraaash 11.11 Meowga Sales RM35 Off' },
+  { minSubtotal: 150, discount: 25, product: '11.11 SALE (-RM25)', shopifyName: 'Fraaash 11.11 Meowga Sales RM25 Off' },
+  { minSubtotal: 100, discount: 11, product: '11.11 SALE (-RM11)', shopifyName: 'Fraaash 11.11 Meowga Sales RM11 Off' }
+];
+// Promo window, Malaysia time (UTC+8): 8 Nov 2026 00:00 -> 11 Nov 2026 23:50.
+// Note month is 0-indexed, so 10 = November.
+const PROMO_1111_START_MY = Date.UTC(2026, 10, 8,  0,  0, 0);
+const PROMO_1111_END_MY   = Date.UTC(2026, 10, 11, 23, 50, 0);
+
+// True while the promo is live. Compares in Malaysia time by shifting "now"
+// +8h into the same pseudo-UTC space as the two bounds above, so this is
+// correct even though Render runs on UTC.
+function isPromo1111Live(nowMs = Date.now()) {
+  const myNow = nowMs + 8 * 60 * 60 * 1000;
+  return myNow >= PROMO_1111_START_MY && myNow <= PROMO_1111_END_MY;
+}
+
+// Highest tier the subtotal qualifies for, or null if below RM100.
+function promo1111TierFor(productSubtotal) {
+  return PROMO_1111_TIERS.find(t => productSubtotal >= t.minSubtotal) || null;
+}
+
+// Product subtotal used for every promo threshold: paid chicken/salmon boxes only.
+function productSubtotalOf(items) {
+  return (items || [])
+    .filter(i => /bawk bawk|gulu gulu/i.test(i.itemName))
+    .reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+}
+
 // ── Set webhook ───────────────────────────────────────────────────────────────
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + '/webhook';
 bot.setWebHook(WEBHOOK_URL)
@@ -216,6 +256,12 @@ MERDEKA PROMOTION (3-day sale, RM6.9 off orders RM100+):
 - Do NOT calculate whether the order actually qualifies for the RM100 minimum yourself — just detect whether the promo was mentioned. The bot verifies the RM100 threshold in code.
 - Set "promoMerdeka": false if not mentioned
 
+11.11 MEOWGA SALE (tiered discount, 8-11 Nov 2026):
+- If the message mentions "11.11", "11.11 SALE", "Meowga", or a promo line like "Promo: 11.11 SALE (-RM25)", set "promo1111": true
+- "promo1111Amount": the discount amount written in the message as a positive number (e.g. "11.11 SALE (-RM25)" -> 25). Use 0 if the promo is mentioned but no amount is written.
+- Do NOT decide which tier applies and do NOT check the RM100/RM150/RM200 thresholds yourself — the bot works out the correct tier from the product subtotal in code. Just report what the message says.
+- Set "promo1111": false and "promo1111Amount": 0 if not mentioned
+
 Return this exact structure:
 {
   "customerName": "",
@@ -237,6 +283,8 @@ Return this exact structure:
   "promo77": false,
   "bundlePromo": false,
   "promoMerdeka": false,
+  "promo1111": false,
+  "promo1111Amount": 0,
   "notes": ""
 }
 
@@ -254,6 +302,8 @@ Rules:
 - promo77: per the 7.7 SALE PROMOTION rule above — true only if explicitly mentioned in the message
 - bundlePromo: per the BUNDLE SET PROMO rule above — true only if explicitly mentioned in the message
 - promoMerdeka: per the MERDEKA PROMOTION rule above — true only if explicitly mentioned in the message
+- promo1111 / promo1111Amount: per the 11.11 MEOWGA SALE rule above — true only if explicitly mentioned in the message
+- collectionDate: also accept a "Shipping date" label (e.g. "Shipping date: 14 Nov 2026" = 2026-11-14)
 - notes: any special instructions. Leave "" if none
 
 Order form:
@@ -273,8 +323,21 @@ ${text}`
     order.promo77           = order.promo77 === true;
     order.bundlePromo       = order.bundlePromo === true;
     order.promoMerdeka      = order.promoMerdeka === true;
+    order.promo1111         = order.promo1111 === true;
+    order.promo1111Amount   = Number(order.promo1111Amount) || 0;
 
-    // 3. Find or create customer
+    // 3. Find or create customer — the phone number is the customer's unique key,
+    //    so an order without one cannot be logged. Stop here with a clear message
+    //    rather than creating a nameless/unmatched profile.
+    if (!normalisePhone(order.contactNumber)) {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        '⚠️ <b>Order NOT logged — missing contact number</b>\n\n' +
+        `👤 <b>Customer:</b> ${order.customerName || 'Unknown'}\n\n` +
+        'Customers are identified by phone number, so a valid contact number is required. ' +
+        'Please add the contact number to the order form and send it again.',
+        { parse_mode: 'HTML' });
+      return;
+    }
     const customerRecId = await findOrCreateCustomer(order);
 
     // 3b. Assign the next WhatsApp order number (e.g. 00473)
@@ -326,6 +389,14 @@ ${text}`
     const bundleQty = (order.bundlePromo && bundleChickenQty > 0 && bundleSalmonQty > 0)
       ? Math.min(bundleChickenQty, bundleSalmonQty) : 0;
 
+    // 11.11 tier is resolved here (before delivery fees) because every tier
+    // includes free shipping. The tier comes from the subtotal we calculate,
+    // never from the amount written in the message — that's only used to warn
+    // about a mismatch below.
+    const subtotal1111  = productSubtotalOf(order.items);
+    const promo1111Live = order.promo1111 && isPromo1111Live();
+    const tier1111      = promo1111Live ? promo1111TierFor(subtotal1111) : null;
+
     if (order.subscriptionType) {
       const freeDeliveryRec = await findProductByName('Subscription Free Delivery');
       if (freeDeliveryRec) {
@@ -339,6 +410,8 @@ ${text}`
       }
     } else if (bundleQty > 0) {
       // Free shipping — no Delivery Fees line item at all
+    } else if (tier1111) {
+      // 11.11 tiers all include free shipping — no Delivery Fees line item
     } else if (order.deliveryFees > 0) {
       const deliveryRec = await findProductByName('Delivery Fees');
       if (deliveryRec) {
@@ -465,6 +538,40 @@ ${text}`
       }
     }
 
+    // 6f. 11.11 Meowga Sale — tiered discount, tier decided by the subtotal we
+    //     calculated (tier1111 above), not by the amount typed in the message.
+    //     warning1111 is surfaced in the Telegram reply so staff can spot a
+    //     mistyped discount or an order that just missed a threshold.
+    let promo1111Applied = null;
+    let warning1111      = null;
+    if (order.promo1111 && !promo1111Live) {
+      warning1111 = `11.11 promo mentioned but it is not running (8–11 Nov 2026, ends 11:50pm) — not applied.`;
+      console.warn(warning1111);
+    } else if (tier1111) {
+      const tierRec = await findProductByName(tier1111.product);
+      if (tierRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [tierRec.id],
+            'Quantity':        tier1111.discount
+          }
+        }]);
+        promo1111Applied = tier1111;
+        // Staff wrote a different amount than the subtotal actually earns.
+        if (order.promo1111Amount && order.promo1111Amount !== tier1111.discount) {
+          warning1111 = `Order form says -RM${order.promo1111Amount} but subtotal RM${subtotal1111} earns -RM${tier1111.discount}. Logged -RM${tier1111.discount} — please check the total.`;
+          console.warn(warning1111);
+        }
+      } else {
+        warning1111 = `11.11 product "${tier1111.product}" not found in Airtable — discount NOT logged.`;
+        console.warn(warning1111);
+      }
+    } else if (order.promo1111) {
+      warning1111 = `11.11 promo mentioned but subtotal RM${subtotal1111} is below the RM100 minimum — not applied.`;
+      console.warn(warning1111);
+    }
+
     // 7. Notify group
     const itemsList = order.items
       .map(i => `• ${i.itemName} x${i.quantity} — RM${(i.price * i.quantity).toFixed(2)}`)
@@ -475,7 +582,7 @@ ${text}`
       `🆔 <b>Order #:</b> ${orderNumber}`,
       '',
       `👤 <b>Customer:</b> ${order.customerName}`,
-      `📞 <b>Contact:</b> ${order.contactNumber}`,
+      `📞 <b>Contact:</b> ${formatPhoneE164(order.contactNumber)}`,
       `🐱 <b>Cat(s):</b> ${order.catNamesStr || '-'}`,
       `📍 <b>Address:</b> ${order.address}`,
       `🚚 <b>Collection:</b> ${poFields['Collection Method']}`,
@@ -487,9 +594,11 @@ ${text}`
       promo77Applied ? `🏷️ <b>7.7 Sale:</b> -RM${PROMO_7_7_DISCOUNT} applied` : null,
       bundleQty > 0 ? `📦 <b>Bundle Set Promo:</b> ${bundleQty} bundle(s) — free shipping` : null,
       promoMerdekaApplied ? `🇲🇾 <b>Merdeka Promo:</b> -RM${PROMO_MERDEKA_DISCOUNT} applied` : null,
+      promo1111Applied ? `🛍️ <b>11.11 Sale:</b> -RM${promo1111Applied.discount} applied (subtotal RM${subtotal1111})` : null,
+      warning1111 ? `⚠️ <b>11.11 check:</b> ${warning1111}` : null,
       '',
       `🛍️ <b>Items:</b>\n${itemsList}`,
-      `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : bundleQty > 0 ? 'Free (Bundle Set)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
+      `📦 <b>Delivery Fee:</b> ${order.subscriptionType ? 'Free (Subscription)' : bundleQty > 0 ? 'Free (Bundle Set)' : promo1111Applied ? 'Free (11.11 Sale)' : (order.deliveryFees === 0 ? 'Free' : 'RM' + order.deliveryFees)}`,
       `💰 <b>Total:</b> RM${order.totalAmount}`,
       '',
       '<i>Saved to Airtable ✓</i>'
@@ -718,11 +827,27 @@ async function handleShopifyOrder(shopifyOrder) {
       numPets:        0
     };
 
-    // Find or create customer in Airtable
-    const customerRecId = await findOrCreateCustomer(order);
-
     // Extract numeric order number from Shopify order name e.g. "SPF1124" -> "1124", "#1124" -> "1124"
     const shopifyOrderName = shopifyOrder.name || String(shopifyOrder.order_number || '');
+
+    // Phone number is the customer's unique key, so we can't log an order without one.
+    // This is a real paid order though, so alert with the full details for manual entry
+    // instead of silently dropping it.
+    if (!normalisePhone(order.contactNumber)) {
+      await bot.sendMessage(GROUP_CHAT_ID,
+        '⚠️ <b>Shopify order NOT logged — no phone number on the order</b>\n\n' +
+        `🆔 <b>Order:</b> ${shopifyOrderName}\n` +
+        `👤 <b>Customer:</b> ${order.customerName}\n` +
+        `📍 <b>Address:</b> ${order.address || 'N/A'}\n` +
+        `💰 <b>Total:</b> RM${shopifyOrder.total_price || '0.00'}\n\n` +
+        'Customers are identified by phone number. Please add the phone number in Shopify ' +
+        'and key this order into Airtable manually.',
+        { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Find or create customer in Airtable
+    const customerRecId = await findOrCreateCustomer(order);
     const orderNumberMatch = shopifyOrderName.match(/(\d+)/);
     const orderNumber      = orderNumberMatch ? orderNumberMatch[1] : shopifyOrderName;
 
@@ -747,6 +872,18 @@ async function handleShopifyOrder(shopifyOrder) {
     const isMerdekaCode =
       discountCodes.includes(PROMO_MERDEKA_SHOPIFY_NAME.toLowerCase()) ||
       discountApplications.some(d => (d.title || '').toLowerCase() === PROMO_MERDEKA_SHOPIFY_NAME.toLowerCase());
+
+    // 11.11 Meowga Sale — three automatic discounts in Shopify, one per tier.
+    // Automatic discounts carry a `title` under discount_applications (they are
+    // not codes the customer types), so match on that; the code check is just a
+    // fallback in case one is ever reconfigured as a code.
+    // We trust whichever tier Shopify actually applied, because that is the
+    // money the customer really paid. If it disagrees with the tier the subtotal
+    // implies, we still log Shopify's and flag the difference.
+    const applied1111Tier = PROMO_1111_TIERS.find(t =>
+      discountApplications.some(d => (d.title || '').toLowerCase() === t.shopifyName.toLowerCase()) ||
+      discountCodes.includes(t.shopifyName.toLowerCase())
+    ) || null;
 
     // Create Purchase Order
     const poFields = {
@@ -894,6 +1031,30 @@ async function handleShopifyOrder(shopifyOrder) {
       }
     }
 
+    // 11.11 Meowga Sale — log the tier Shopify actually applied.
+    let promo1111Applied = null;
+    if (applied1111Tier) {
+      const tierRec = await findProductByName(applied1111Tier.product);
+      if (tierRec) {
+        await base(T_LINEITEMS).create([{
+          fields: { 'Purchase Orders': [poRecId], 'Item Name': [tierRec.id], 'Quantity': applied1111Tier.discount }
+        }]);
+        matchedItems.push(`${applied1111Tier.product} (-RM${applied1111Tier.discount})`);
+        promo1111Applied = applied1111Tier;
+      } else {
+        console.warn(`11.11 product "${applied1111Tier.product}" not found in Airtable — discount NOT logged.`);
+      }
+
+      // Sanity check against the subtotal. Shopify's figure wins, but a mismatch
+      // usually means a discount's minimum was edited and is worth knowing about.
+      const subtotal1111 = lineItems.reduce(
+        (sum, item) => sum + parseFloat(item.price || 0) * (item.quantity || 0), 0);
+      const expectedTier = promo1111TierFor(subtotal1111);
+      if (!expectedTier || expectedTier.discount !== applied1111Tier.discount) {
+        console.warn(`11.11 tier mismatch: Shopify applied -RM${applied1111Tier.discount} but subtotal RM${subtotal1111} implies ${expectedTier ? '-RM' + expectedTier.discount : 'no discount'}.`);
+      }
+    }
+
     // Calculate total boxes ordered (chicken + salmon combined) directly from line items.
     // A Bundle Set line counts as 2 boxes per qty (1 chicken + 1 salmon).
     // 4 or more boxes = free shipping promotion, so skip the Delivery Fees line item entirely
@@ -903,22 +1064,25 @@ async function handleShopifyOrder(shopifyOrder) {
     }, 0);
     const qualifiesForFreeShipping = totalBoxesOrdered >= 4;
 
-    if (!qualifiesForFreeShipping) {
-      const shippingTotal = parseFloat(shopifyOrder.total_shipping_price_set?.shop_money?.amount || 0);
-      if (shippingTotal > 0) {
-        const deliveryRec = await findProductByName('Delivery Fees');
-        if (deliveryRec) {
-          await base(T_LINEITEMS).create([{
-            fields: {
-              'Purchase Orders': [poRecId],
-              'Item Name':       [deliveryRec.id],
-              'Quantity':        Math.round(shippingTotal)
-            }
-          }]);
-        }
+    // The shipping amount is READ FROM THE ORDER, never hardcoded — so a rate change
+    // (e.g. RM20 -> RM15) flows through automatically with no code change.
+    const shippingCharged = qualifiesForFreeShipping
+      ? 0
+      : parseFloat(shopifyOrder.total_shipping_price_set?.shop_money?.amount || 0);
+
+    if (shippingCharged > 0) {
+      const deliveryRec = await findProductByName('Delivery Fees');
+      if (deliveryRec) {
+        await base(T_LINEITEMS).create([{
+          fields: {
+            'Purchase Orders': [poRecId],
+            'Item Name':       [deliveryRec.id],
+            'Quantity':        Math.round(shippingCharged)
+          }
+        }]);
       }
     }
-    // else: 4+ boxes ordered, free shipping promo applies — no Delivery Fees line item created
+    // else: 4+ boxes ordered (or Shopify charged nothing) — no Delivery Fees line item created
 
     // Notify Telegram group
     const totalAmount = shopifyOrder.total_price || '0.00';
@@ -927,14 +1091,18 @@ async function handleShopifyOrder(shopifyOrder) {
       '',
       `🆔 <b>Shopify Order #:</b> ${orderNumber} (${shopifyOrderName})`,
       `👤 <b>Customer:</b> ${order.customerName}`,
-      `📞 <b>Contact:</b> ${order.contactNumber || 'N/A'}`,
+      `📞 <b>Contact:</b> ${formatPhoneE164(order.contactNumber) || 'N/A'}`,
       `📍 <b>Address:</b> ${order.address || 'N/A'}`,
       '',
       `🛍️ <b>Items:</b>\n${matchedItems.map(i => '• ' + i).join('\n') || 'See Shopify order'}`,
+      promo1111Applied ? `🛍️ <b>11.11 Sale:</b> -RM${promo1111Applied.discount} applied` : null,
+      `📦 <b>Delivery Fee:</b> ${shippingCharged > 0
+        ? 'RM' + Math.round(shippingCharged)
+        : (qualifiesForFreeShipping ? 'Free (4+ boxes)' : 'Free')}`,
       `💰 <b>Total:</b> RM${totalAmount}`,
       '',
       '<i>Saved to Airtable ✓</i>'
-    ].join('\n');
+    ].filter(line => line !== null).join('\n');
 
     await bot.sendMessage(GROUP_CHAT_ID, msg, { parse_mode: 'HTML' });
 
@@ -960,33 +1128,72 @@ async function findProductByNameFuzzy(shopifyTitle) {
   return null;
 }
 
+// ── Normalise a phone number to its last 9 digits ────────────────────────────
+// This is the ONLY identity key for a customer. Strips every non-digit, then
+// takes the last 9 so all of these resolve to the same customer:
+//   +60164152237 / 0164152237 / (016) 415-2237 / 016 415 2237 -> 164152237
+// Returns '' when there aren't enough digits to be a real number.
+function normalisePhone(raw) {
+  const digitsOnly = String(raw || '').replace(/[^0-9]/g, '');
+  return digitsOnly.length >= 9 ? digitsOnly.slice(-9) : '';
+}
+
+// ── Format a phone number for storage in Airtable ────────────────────────────
+// Everything is stored in E.164: a leading "+", then country code, then the
+// number — with every space, dash, bracket and stray character stripped out.
+//   0164152237     -> +60164152237   (MY local: leading 0 swapped for 60)
+//   60164152237    -> +60164152237   (already carries the MY country code)
+//   164152237      -> +60164152237   (MY mobile written without the leading 0)
+//   016-415 2237   -> +60164152237
+//   +6016 415 2237 -> +60164152237
+//   03-12345678    -> +60312345678   (MY landline)
+//   6564152237     -> +6564152237    (foreign: its own country code is kept)
+// Foreign numbers are assumed to already include their country code — there is
+// no way to infer one — so they are passed through with just the cleanup and
+// the "+". Only recognisably Malaysian local formats get 60 added.
+// NOTE: this only affects how the number is DISPLAYED/STORED. Customer matching
+// still uses normalisePhone() (last 9 digits), which ignores formatting, so
+// records saved in any older format continue to match correctly.
+function formatPhoneE164(raw) {
+  let d = String(raw || '').replace(/[^0-9]/g, '');
+  if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2);             // 00 international prefix
+  if (d.startsWith('60')) return '+' + d;             // already Malaysian E.164
+  if (d.startsWith('0'))  return '+60' + d.slice(1);  // MY local, drop the 0
+  if (/^1\d{7,9}$/.test(d)) return '+60' + d;         // MY mobile, no leading 0
+  return '+' + d;                                     // foreign, code included
+}
+
 // ── Find or create customer ───────────────────────────────────────────────────
+// Customers are matched STRICTLY on phone number — never on name.
+//   • Same phone, different name ("Jason" vs "Jason Tan") -> same customer.
+//   • Same name, different phone ("Jason" vs "Jason")     -> two customers.
+// Matching on name was previously a fallback and caused unrelated customers who
+// happened to share a name to be merged into one profile. It is gone on purpose;
+// do not reintroduce it. No phone number means we cannot identify the customer
+// at all, so the order is rejected upstream rather than guessed at.
 async function findOrCreateCustomer(order) {
-  let existing = [];
-
-  // 1. Match by contact number — compare last 9 digits only
-  //    Handles +60164152237, 0164152237, (016) 415-2237 all as the same number
-  if (order.contactNumber) {
-    const digitsOnly = order.contactNumber.replace(/[^0-9]/g, '');
-    const last9       = digitsOnly.slice(-9);
-    existing = await base(T_CUSTOMERS).select({
-      filterByFormula: `RIGHT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE({Contact Number}, "+", ""), "-", ""), "(", ""), ")", " "), 9) = "${last9}"`,
-      maxRecords: 1
-    }).all();
+  const last9 = normalisePhone(order.contactNumber);
+  if (!last9) {
+    throw new Error('Missing or invalid contact number — a phone number is required to identify the customer.');
   }
 
-  // 2. Fall back to name
-  if (existing.length === 0 && order.customerName) {
-    existing = await base(T_CUSTOMERS).select({
-      filterByFormula: `{Name} = '${order.customerName.replace(/'/g, "\\'")}'`,
-      maxRecords: 1
-    }).all();
-  }
+  // Match by contact number only. The stored value may carry any formatting,
+  // so strip +, -, (, ) and spaces on the Airtable side before comparing.
+  const existing = await base(T_CUSTOMERS).select({
+    filterByFormula: `RIGHT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE({Contact Number}, "+", ""), "-", ""), "(", ""), ")", ""), " ", ""), 9) = "${last9}"`,
+    maxRecords: 1
+  }).all();
 
   if (existing.length > 0) {
     const rec     = existing[0];
     const updates = {};
-    if (!rec.get('Contact Number') && order.contactNumber) updates['Contact Number'] = order.contactNumber;
+    // Keep stored numbers in the standard 60... format. This also quietly tidies up
+    // any older record still saved as 016-4152237 the next time that customer orders.
+    const formattedPhone = formatPhoneE164(order.contactNumber);
+    if (formattedPhone && rec.get('Contact Number') !== formattedPhone) {
+      updates['Contact Number'] = formattedPhone;
+    }
     if (!rec.get('Address') && order.address)               updates['Address']        = order.address;
     if (!rec.get('Pet Name') && order.catNamesStr)          updates['Pet Name']       = order.catNamesStr;
     if (order.numPets > 0)                                  updates['No. of Pets']    = order.numPets;
@@ -1023,7 +1230,7 @@ async function findOrCreateCustomer(order) {
 
   const newFields = {
     'Name':           order.customerName,
-    'Contact Number': order.contactNumber || '',
+    'Contact Number': formatPhoneE164(order.contactNumber),
     'Address':        order.address || '',
     'Pet Name':       order.catNamesStr || '',
     'No. of Pets':    order.numPets || 0
